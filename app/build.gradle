@@ -1,1 +1,32 @@
+plugins {
+    id 'com.android.application'
+}
 
+android {
+    namespace 'com.norvex.roleplay'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.norvex.roleplay'
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        debug {
+        }
+        release {
+            // Tanpa minify: jembatan JS window.AppInventor tidak boleh dibuang.
+            minifyEnabled false
+        }
+    }
+}
+
+// SENGAJA tanpa dependencies: hanya framework Android (hemat kuota & waktu build).
