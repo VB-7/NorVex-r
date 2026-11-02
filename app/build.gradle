@@ -10,8 +10,9 @@ android {
         applicationId 'com.norvex.roleplay'
         minSdk 21
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        // Nomor versi OTOMATIS dari nomor build GitHub (tak perlu dipikir).
+        versionCode (System.getenv("VC") ?: "1") as int
+        versionName "1.0.${System.getenv("VC") ?: "1"}"
     }
 
     compileOptions {
@@ -19,12 +20,26 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        nvx {
+            storeFile file("../norvex.keystore")
+            storePassword System.getenv("KS_PASS") ?: "norvex123"
+            keyAlias "norvex"
+            keyPassword System.getenv("KS_PASS") ?: "norvex123"
+        }
+    }
+
     buildTypes {
         debug {
+            // Install langsung tanpa tanda tangan, tapi TANPA alat pantau
+            // debug (debuggable=false) agar ringan seperti build rilis.
+            debuggable false
         }
         release {
             // Tanpa minify: jembatan JS window.AppInventor tidak boleh dibuang.
             minifyEnabled false
+            // Tanda tangan: kunci tetap dari secret (bootstrap: norvex123).
+            signingConfig signingConfigs.nvx
         }
     }
 }
