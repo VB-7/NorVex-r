@@ -48,7 +48,9 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.PrintWriter;
 import java.io.RandomAccessFile;
+import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
@@ -742,6 +744,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        hookCrashLogger(); // catat biang force-close ke folder error/
         hideNav();
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new FrameLayout.LayoutParams(
@@ -846,7 +849,14 @@ public class MainActivity extends Activity {
             }
         });
 
-        try { registerReceiver(dlReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)); } catch (Exception ignored) {}
+        try {
+            IntentFilter dlFilter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(dlReceiver, dlFilter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(dlReceiver, dlFilter);
+            }
+        } catch (Exception ignored) {}
 
         // Privasi: pastikan .nomedia ada (sejak awal, bukan saat unduh pertama).
         try {
@@ -861,6 +871,34 @@ public class MainActivity extends Activity {
         }
 
         checkUpdate();
+    }
+
+    // Perekam force-close: tulis stack trace ke error/crash-*.txt,
+    // lalu biarkan dialog sistem seperti biasa.
+    private void hookCrashLogger() {
+        try {
+            final Thread.UncaughtExceptionHandler def = Thread.getDefaultUncaughtExceptionHandler();
+            Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                @Override
+                public void uncaughtException(Thread t, Throwable e) {
+                    try {
+                        String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+                        String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+                        StringWriter sw = new StringWriter();
+                        try { e.printStackTrace(new PrintWriter(sw)); } catch (Exception ignored) {}
+                        File f = new File(errorDir(), "crash-" + day + ".txt");
+                        FileOutputStream out = null;
+                        try {
+                            out = new FileOutputStream(f, true);
+                            out.write(("[" + ts + "] CRASH: " + sw.toString() + "\n").getBytes("UTF-8"));
+                        } finally {
+                            try { if (out != null) out.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                    try { if (def != null) def.uncaughtException(t, e); } catch (Exception ignored) {}
+                }
+            });
+        } catch (Exception ignored) {}
     }
 
     private void hideNav() {
