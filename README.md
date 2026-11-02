@@ -1,6 +1,6 @@
 # ⚡ NorVex-r
 
-Aplikasi obrolan karakter AI berbasis Perchance yang dikemas dalam *native shell* Android. Ringan, responsif, dan didesain untuk kenyamanan interaksi AI sehari-hari.
+Aplikasi obrolan karakter AI berbasis AI Text dan AI image yang dikemas dalam *native shell* Android. Ringan, responsif, dan didesain untuk kenyamanan interaksi AI sehari-hari.
 
 ---
 
