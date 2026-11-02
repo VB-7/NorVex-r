@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private static final int GREET_TIMES = 5;
     private static final long GREET_EVERY_MS = 1500L;
     private static final int FILE_REQ = 1001;
+    private static final int REQ_STORAGE = 8; // izin tulis (HP Android 9/10)
     private static final int CHUNK_RAW = 256 * 1024; // byte mentah per potong (disepakati dgn web)
 
     private WebView web;
@@ -775,6 +776,10 @@ public class MainActivity extends Activity {
         root.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        // Keyboard: biar kolom ketik tak ketimpa (lihat fixKeyboardOverlap).
+        try { getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Exception ignored) {}
+        fixKeyboardOverlap(root);
+        ensureStoragePerm(); // minta izin tulis SEKALI (HP Android 9/10)
 
         web = new WebView(this);
         root.addView(web, new FrameLayout.LayoutParams(
@@ -996,6 +1001,35 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    // Keyboard menutupi kolom ketik (fullscreen mematikan adjustResize bawaan di
+    // sebagian HP): ukur tinggi keyboard dari bingkai terlihat, ganjal bawah
+    // WebView sebesar itu. Bila adjustResize sistem sudah bekerja, selisih ~0
+    // jadi tak berbuat apa-apa (tak ganda).
+    private void fixKeyboardOverlap(final View root) {
+        try {
+            root.getViewTreeObserver().addOnGlobalLayoutListener(
+                    new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                        private int lastPad = -1;
+                        @Override public void onGlobalLayout() {
+                            try {
+                                if (web == null) return;
+                                android.graphics.Rect r = new android.graphics.Rect();
+                                root.getWindowVisibleDisplayFrame(r);
+                                int full = root.getRootView().getHeight();
+                                int kb = full - r.bottom;
+                                if (kb < 0) kb = 0;
+                                int minKb = (int) (100 * getResources().getDisplayMetrics().density);
+                                int pad = (kb > minKb) ? kb : 0;
+                                if (pad != lastPad) {
+                                    lastPad = pad;
+                                    web.setPadding(0, 0, 0, pad);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    });
+        } catch (Exception ignored) {}
+    }
+
     private void toast(final String msg) {
         try { Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); } catch (Exception ignored) {}
     }
@@ -1008,6 +1042,41 @@ public class MainActivity extends Activity {
                     && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 7);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // Izin tulis (HP Android 9/10, API<=29): tanpa ini folder perchance_app tak bisa
+    // ditulis, semua diam-diam jatuh ke folder aplikasi (user tak menemukan file
+    // di file manager + tak ada izin di Setting aplikasi).
+    private void ensureStoragePerm() {
+        try {
+            if (Build.VERSION.SDK_INT <= 29
+                    && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] grants) {
+        super.onRequestPermissionsResult(req, perms, grants);
+        try {
+            if (req == REQ_STORAGE) {
+                boolean ok = grants != null && grants.length > 0
+                        && grants[0] == PackageManager.PERMISSION_GRANTED;
+                if (ok) {
+                    try {
+                        File base = baseDirExternal();
+                        if (base != null) ensureNoMedia(new File(base, "download"));
+                    } catch (Exception ignored) {}
+                    toast("Izin penyimpanan OK — file tersimpan di perchance_app/Roleplay");
+                    trace("izin tulis diberikan");
+                } else {
+                    toast("Tanpa izin, file tersimpan di folder aplikasi (bukan perchance_app)");
+                    trace("izin tulis ditolak");
+                }
             }
         } catch (Exception ignored) {}
     }
