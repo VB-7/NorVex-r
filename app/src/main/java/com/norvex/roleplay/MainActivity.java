@@ -2,10 +2,17 @@ package com.norvex.roleplay;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -13,7 +20,14 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.provider.Settings;
+import android.util.Base64;
+import android.view.MotionEvent;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.webkit.ConsoleMessage;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -25,27 +39,40 @@ import android.webkit.WebViewClient;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.DownloadListener;
 import android.widget.FrameLayout;
+import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.RandomAccessFile;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
 /**
- * Pembungkus native untuk web Roleplay AI (pengganti MIT App Inventor).
- * Kontrak protokol: sama persis dengan src/mit/protocol.md —
- * web yang sama jalan tanpa perubahan karena nama jembatan JS-nya identik:
- * window.AppInventor.setWebViewString / getWebViewString.
+ * NorVex-R — aplikasi native (bukan MIT).
+ * Kontrak protokol: src/mit/protocol.md (web menjembatani via window.AppInventor).
  *
- * - Timer: setelah halaman selesai, dorong {"is_mit":true} 5x @1500ms.
- * - Masuk (JS -> native): on_download -> DownloadManager; is_preview -> flag;
- *   keyboard=false -> sembunyikan keyboard.
- * - Back: pratinjau? kirim {"is_preview":false} : (bisa kembali? kembali : keluar).
- * - Upload file (<input type=file>): pemilih file sistem.
+ * Prinsip: web kirim mentah (termasuk blob per potong), aplikasi yang tulis file.
+ * Tanpa upload ke mana pun kecuali user tekan salin-link/backup-link (itu urusan web).
  */
 public class MainActivity extends Activity {
 
     private static final String START_URL = "https://perchance.org/norvex-r?is-mit";
+    private static final String UPDATE_REPO = "VB-7/NorVex-r";
     private static final int GREET_TIMES = 5;
     private static final long GREET_EVERY_MS = 1500L;
     private static final int FILE_REQ = 1001;
+    private static final int CHUNK_RAW = 256 * 1024; // byte mentah per potong (disepakati dgn web)
 
     private WebView web;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -53,7 +80,15 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCb;
     private int greetLeft = 0;
 
-    /** Jembatan JS — nama & perilaku sama dengan CustomWebView MIT. */
+    private final ArrayList<Dialog> dialogStack = new ArrayList<Dialog>();
+    private final Map<String, PartState> parts = new HashMap<String, PartState>();
+    private boolean notifAsked = false;
+    private boolean pausedCheckpointSent = false;
+    private long lastErrorDialogAt = 0;
+    private long updateDownloadId = -1;
+
+    // ---------------- Jembatan JS (nama sama dengan MIT: window.AppInventor) ----------------
+
     public class Bridge {
         private volatile String webViewString = "";
 
@@ -70,44 +105,644 @@ public class MainActivity extends Activity {
             return webViewString;
         }
 
-        /** Dorongan sapaan (native -> web). BUKAN pesan masuk: jangan diproses. */
         void greet() {
             webViewString = "{\"is_mit\":true}";
         }
-    }
 
-    /** Pesan MASUK dari web (hanya yang lewat setWebViewString JS). */
-    private void onWebString(String s) {
-        if (s == null || s.isEmpty()) return;
-        try {
-            JSONObject o = new JSONObject(s);
-            if (o.has("on_download")) {
-                JSONObject d = o.getJSONObject("on_download");
-                startDownload(
-                        d.optString("url", ""),
-                        d.optString("filename", "download"),
-                        d.optString("mimetype", ""));
-                return;
-            }
-            if (o.has("is_preview")) {
-                previewActive = o.optBoolean("is_preview", false);
-                return;
-            }
-            if (o.has("keyboard")) {
-                keyboardActive = o.optBoolean("keyboard", false);
-                if (!keyboardActive) hideKeyboard();
-            }
-        } catch (Exception ignored) {
-            // Bukan JSON / bukan kunci dikenal: abaikan diam-diam.
+        void greetNative() {
+            webViewString = "{\"is_native\":true}";
         }
     }
 
-    private boolean previewActive = false;
-    private boolean keyboardActive = false;
+    private static class PartState {
+        String id, target, name, mime;
+        long size;
+        File partFile;
+        RandomAccessFile raf;
+        long received;
+    }
+
+    // ---------------- Pesan MASUK dari web ----------------
+
+    private void onWebString(String s) {
+        if (s == null || s.isEmpty()) return;
+        try {
+            JSONObject o;
+            try { o = new JSONObject(s); } catch (Exception e) { return; } // bukan JSON: abaikan
+            if (o.has("file_start")) { onFileStart(o.optJSONObject("file_start")); return; }
+            if (o.has("file_chunk")) { onFileChunk(o.optJSONObject("file_chunk")); return; }
+            if (o.has("file_end")) { onFileEnd(o.optJSONObject("file_end")); return; }
+            if (o.has("preview")) { onPreview(o.optJSONObject("preview")); return; }
+            if (o.has("task")) { onTask(o.optJSONObject("task")); return; }
+            if (o.has("log")) { onWebLog(o.optJSONObject("log")); return; }
+            if (o.has("on_download")) {
+                JSONObject d = o.optJSONObject("on_download");
+                if (d != null) startDownloadHttp(d.optString("url", ""), d.optString("filename", "download"), d.optString("mimetype", ""));
+                return;
+            }
+            if (o.has("is_preview")) return; // kompat: web menyimpan status sendiri (mode MIT lama)
+            if (o.has("keyboard")) {
+                if (!o.optBoolean("keyboard", false)) hideKeyboard();
+            }
+        } catch (Throwable t) {
+            logError("bridge", String.valueOf(t));
+        }
+    }
+
+    // ---------------- File mentah per potong (blob/data dari web) ----------------
+
+    private void onFileStart(JSONObject f) {
+        try {
+            if (f == null) return;
+            String id = f.optString("id", "");
+            if (id.isEmpty()) return;
+            PartState st = new PartState();
+            st.id = id;
+            st.target = sanitizeTarget(f.optString("target", "download"));
+            st.name = sanitizeName(f.optString("name", "download"));
+            st.mime = f.optString("mime", "");
+            st.size = f.optLong("size", -1);
+            try {
+                File dir = new File(getCacheDir(), "parts");
+                dir.mkdirs();
+                st.partFile = new File(dir, "p-" + sanitizeName(id));
+                st.raf = new RandomAccessFile(st.partFile, "rw");
+                st.raf.setLength(0);
+            } catch (Exception e) {
+                logError("file_start", e.toString());
+                return;
+            }
+            parts.put(id, st);
+            taskStart("dl-" + id, "Menerima " + st.name);
+        } catch (Throwable t) { logError("file_start", String.valueOf(t)); }
+    }
+
+    private void onFileChunk(JSONObject f) {
+        try {
+            if (f == null) return;
+            PartState st = parts.get(f.optString("id", ""));
+            if (st == null || st.raf == null) return;
+            String data = f.optString("data", "");
+            if (data.isEmpty()) return;
+            byte[] raw;
+            try { raw = Base64.decode(data, Base64.DEFAULT); } catch (Exception e) { return; }
+            long n = f.optLong("n", -1);
+            try {
+                if (n >= 0) st.raf.seek(n * CHUNK_RAW);
+                st.raf.write(raw);
+                st.received += raw.length;
+            } catch (Exception e) { logError("file_chunk", e.toString()); }
+        } catch (Throwable t) { logError("file_chunk", String.valueOf(t)); }
+    }
+
+    private void onFileEnd(JSONObject f) {
+        try {
+            if (f == null) return;
+            String id = f.optString("id", "");
+            PartState st = parts.remove(id);
+            taskEnd("dl-" + id);
+            if (st == null) return;
+            try { if (st.raf != null) st.raf.close(); } catch (Exception ignored) {}
+            File dest = resolveTarget(st.target, st.name);
+            if (dest == null || st.partFile == null || !st.partFile.exists()) {
+                toast("Gagal menyimpan " + st.name);
+                logError("file_end", "tujuan tak bisa dipakai: " + st.target + "/" + st.name);
+                return;
+            }
+            try {
+                copyFile(st.partFile, dest);
+                try { st.partFile.delete(); } catch (Exception ignored) {}
+                String loc = locationLabel(dest);
+                toast("Tersimpan: " + loc + "/" + dest.getName());
+            } catch (Exception e) {
+                toast("Gagal menyimpan " + st.name);
+                logError("file_end", e.toString());
+            }
+        } catch (Throwable t) { logError("file_end", String.valueOf(t)); }
+    }
+
+    private String sanitizeName(String s) {
+        if (s == null) return "download";
+        s = s.replaceAll("[/\\\\]+", "_").replaceAll("\\.+", ".").trim();
+        if (s.isEmpty() || s.equals(".") || s.equals("..")) return "download";
+        if (s.length() > 120) s = s.substring(0, 120);
+        return s;
+    }
+
+    // target: "download" | "download/image/<kartu>" | ".backup" — tiap segmen aman.
+    private String sanitizeTarget(String t) {
+        if (t == null || t.isEmpty()) return "download";
+        String[] segs = t.split("/");
+        StringBuilder sb = new StringBuilder();
+        for (String g : segs) {
+            if (g == null) continue;
+            g = g.trim();
+            if (g.isEmpty() || g.equals(".") || g.equals("..")) continue;
+            if (!g.matches("[\\w][\\w.\\- ]*")) continue;
+            if (sb.length() > 0) sb.append("/");
+            sb.append(g);
+            if (sb.length() > 120) break;
+        }
+        String out = sb.toString();
+        if (out.isEmpty()) return "download";
+        if (out.equals(".backup") || out.startsWith(".backup/")) return out;
+        if (out.equals("download") || out.startsWith("download/")) return out;
+        return "download/" + out;
+    }
+
+    // Basis folder: /storage/emulated/0/perchance_app/Roleplay (WAJIB user).
+    // Gagal (scope storage / tanpa izin) -> folder khusus aplikasi (selalu bisa).
+    private File baseDirExternal() {
+        try {
+            File base = new File(Environment.getExternalStorageDirectory(), "perchance_app/Roleplay");
+            base.mkdirs();
+            if (base.isDirectory() && base.canWrite()) return base;
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private File resolveTarget(String target, String name) {
+        try {
+            File base = baseDirExternal();
+            if (base != null) {
+                File d = new File(base, target);
+                d.mkdirs();
+                if (target.startsWith("download")) ensureNoMedia(new File(base, "download"));
+                if (d.isDirectory()) return new File(d, name);
+            }
+            File fb = new File(getExternalFilesDir(null), "Roleplay/" + target);
+            fb.mkdirs();
+            if (fb.isDirectory()) return new File(fb, name);
+        } catch (Exception e) { logError("resolve", e.toString()); }
+        return null;
+    }
+
+    private String locationLabel(File dest) {
+        try {
+            String p = dest.getParent();
+            File ext = baseDirExternal();
+            if (ext != null && p != null && p.startsWith(ext.getAbsolutePath())) {
+                return p.substring(ext.getParent().length() + 1); // "perchance_app/Roleplay/..."
+            }
+        } catch (Exception ignored) {}
+        return "folder aplikasi";
+    }
+
+    // .nomedia: sembunyikan dari galeri/pemutar media (privasi!). Rekursif ke subfolder.
+    private void ensureNoMedia(File downloadDir) {
+        try {
+            if (downloadDir == null) return;
+            File nm = new File(downloadDir, ".nomedia");
+            if (!nm.exists()) { try { nm.createNewFile(); } catch (Exception ignored) {} }
+        } catch (Exception ignored) {}
+    }
+
+    private void copyFile(File src, File dst) throws Exception {
+        FileInputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = new FileInputStream(src);
+            out = new FileOutputStream(dst);
+            byte[] buf = new byte[256 * 1024];
+            int r;
+            while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+            out.getFD().sync();
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) {}
+            try { if (out != null) out.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    // ---------------- Unduhan http langsung (DownloadManager, tanpa izin apa pun) ----------------
+
+    private void startDownloadHttp(String url, String filename, String mime) {
+        if (url == null || !url.startsWith("http")) return;
+        final String safe = sanitizeName(filename == null || filename.isEmpty() ? "download" : filename);
+        taskStart("dl-http", "Mengunduh " + safe);
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) { toast("Unduhan gagal: layanan tidak ada"); taskEnd("dl-http"); return; }
+            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
+            r.setTitle(safe);
+            r.setDescription("NorVex-R");
+            r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            // WAJIB: /storage/emulated/0/perchance_app/Roleplay/download/
+            r.setDestinationInExternalPublicDir("perchance_app", "Roleplay/download/" + safe);
+            if (mime != null && !mime.isEmpty()) { try { r.setMimeType(mime); } catch (Exception ignored) {} }
+            dm.enqueue(r);
+            toast("Mengunduh " + safe + " ke perchance_app/Roleplay/download");
+        } catch (Exception e) {
+            toast("Unduhan gagal dimulai");
+            logError("download-http", e.toString());
+            taskEnd("dl-http");
+        }
+    }
+
+    // ---------------- Pratinjau: jendela gambar sendiri (WebView polos) ----------------
+
+    private void onPreview(JSONObject p) {
+        try {
+            if (p == null) return;
+            String url = p.optString("url", "");
+            if (url.isEmpty()) return;
+            showPreview(url);
+        } catch (Throwable t) { logError("preview", String.valueOf(t)); }
+    }
+
+    private void showPreview(final String url) {
+        try {
+            closeDialogType(PreviewDialog.class);
+            final PreviewDialog d = new PreviewDialog(this, url);
+            pushDialog(d);
+            d.show();
+        } catch (Throwable t) { logError("preview", String.valueOf(t)); }
+    }
+
+    private static class PreviewDialog extends Dialog {
+        private final String url;
+        private float downY = -1;
+
+        PreviewDialog(Context ctx, String u) {
+            super(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+            url = u;
+        }
+
+        @Override
+        protected void onCreate(Bundle b) {
+            super.onCreate(b);
+            requestWindowFeature(Window.FEATURE_NO_TITLE);
+            FrameLayout root = new FrameLayout(getContext());
+            root.setBackgroundColor(0xFF000000);
+            setContentView(root);
+            WebView w = new WebView(getContext());
+            root.addView(w, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            WebSettings s = w.getSettings();
+            s.setJavaScriptEnabled(false);
+            s.setBuiltInZoomControls(true);
+            s.setDisplayZoomControls(false);
+            s.setLoadWithOverviewMode(true);
+            s.setUseWideViewPort(true);
+            if (url.startsWith("data:")) {
+                String html = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=5'/>" +
+                        "<style>html,body{margin:0;background:#000;height:100%}img{width:100%;height:auto}</style></head>" +
+                        "<body><img src='" + url.replace("'", "") + "'/></body></html>";
+                w.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
+            } else {
+                w.loadUrl(url);
+            }
+            // Geser-bawah = tutup (enak, ala MIT).
+            root.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v, MotionEvent e) {
+                    try {
+                        if (e.getAction() == MotionEvent.ACTION_DOWN) downY = e.getY();
+                        else if (e.getAction() == MotionEvent.ACTION_MOVE && downY >= 0) {
+                            float dy = e.getY() - downY;
+                            if (dy > 0) v.setTranslationY(dy);
+                        } else if (e.getAction() == MotionEvent.ACTION_UP || e.getAction() == MotionEvent.ACTION_CANCEL) {
+                            float dy = e.getY() - downY;
+                            downY = -1;
+                            if (dy > 240) { dismiss(); return true; }
+                            v.setTranslationY(0);
+                        }
+                    } catch (Exception ignored) {}
+                    return false;
+                }
+            });
+        }
+    }
+
+    // ---------------- Tugas latar (service + notifikasi) ----------------
+
+    private void onTask(JSONObject t) {
+        try {
+            if (t == null) return;
+            String id = t.optString("id", "");
+            String phase = t.optString("phase", "");
+            if (id.isEmpty()) return;
+            if ("done".equals(phase)) taskEnd(id);
+            else taskStart(id, t.optString("label", defaultTaskLabel(id)));
+        } catch (Throwable th) { logError("task", String.valueOf(th)); }
+    }
+
+    private String defaultTaskLabel(String id) {
+        if ("ai".equals(id)) return "AI menjawab…";
+        if (id.startsWith("dl")) return "Mengunduh…";
+        return "Bekerja…";
+    }
+
+    private void taskStart(String id, String label) {
+        try {
+            ensureNotifPerm();
+            Intent i = new Intent(this, TaskService.class);
+            i.setAction(TaskService.ACT_START);
+            i.putExtra(TaskService.EXTRA_ID, id);
+            i.putExtra(TaskService.EXTRA_LABEL, label == null ? "" : label);
+            startSvc(i);
+        } catch (Throwable t) { logError("taskStart", String.valueOf(t)); }
+    }
+
+    private void taskEnd(String id) {
+        try {
+            Intent i = new Intent(this, TaskService.class);
+            i.setAction(TaskService.ACT_END);
+            i.putExtra(TaskService.EXTRA_ID, id == null ? "" : id);
+            startSvc(i);
+        } catch (Throwable t) { logError("taskEnd", String.valueOf(t)); }
+    }
+
+    private void startSvc(Intent i) {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
+            else startService(i);
+        } catch (Exception e) { logError("service", e.toString()); }
+    }
+
+    // ---------------- Error: log file + dialog (fallback berlapis) ----------------
+
+    private void onWebLog(JSONObject l) {
+        try {
+            if (l == null) return;
+            String level = l.optString("level", "error");
+            String msg = l.optString("msg", "");
+            if (msg.isEmpty()) return;
+            logError("web-" + level, msg);
+            if ("fatal".equals(level)) showErrorDialog(msg);
+        } catch (Throwable t) { logError("weblog", String.valueOf(t)); }
+    }
+
+    private File errorDir() {
+        try {
+            File base = baseDirExternal();
+            File d = (base != null) ? new File(base, "error") : new File(getFilesDir(), "error");
+            d.mkdirs();
+            if (d.isDirectory()) return d;
+        } catch (Exception ignored) {}
+        return getCacheDir();
+    }
+
+    private void logError(String tag, String msg) {
+        try {
+            String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+            String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+            File f = new File(errorDir(), "log-" + day + ".txt");
+            FileOutputStream out = null;
+            try {
+                out = new FileOutputStream(f, true);
+                out.write(("[" + ts + "][" + tag + "] " + msg + "\n").getBytes("UTF-8"));
+            } finally {
+                try { if (out != null) out.close(); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void showErrorDialog(final String msg) {
+        try {
+            long now = System.currentTimeMillis();
+            if (now - lastErrorDialogAt < 5000) { // anti-spam: 1 dialog per 5 dtk
+                toast("Galat: " + shortMsg(msg));
+                return;
+            }
+            lastErrorDialogAt = now;
+            AlertDialog d = new AlertDialog.Builder(this)
+                    .setTitle("Terjadi galat")
+                    .setMessage(shortMsg(msg) + "\n\n(catatan tersimpan di folder error)")
+                    .setPositiveButton("Tutup", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface di, int w) { try { di.dismiss(); } catch (Exception ignored) {} }
+                    })
+                    .setCancelable(true)
+                    .create();
+            pushDialog(d);
+            d.show();
+        } catch (Throwable t) {
+            try { toast("Galat: " + shortMsg(msg)); } catch (Exception ignored) {}
+        }
+    }
+
+    private String shortMsg(String s) {
+        if (s == null) return "-";
+        s = s.trim();
+        return s.length() > 400 ? s.substring(0, 400) + "…" : s;
+    }
+
+    // ---------------- Cek update dalam aplikasi ----------------
+
+    private void checkUpdate() {
+        try {
+            SharedPreferences sp = getSharedPreferences("nv", MODE_PRIVATE);
+            long last = sp.getLong("upd_last", 0);
+            if (System.currentTimeMillis() - last < 24L * 3600 * 1000) return;
+            sp.edit().putLong("upd_last", System.currentTimeMillis()).apply();
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        URL u = new URL("https://api.github.com/repos/" + UPDATE_REPO + "/releases/latest");
+                        HttpURLConnection c = (HttpURLConnection) u.openConnection();
+                        c.setRequestProperty("User-Agent", "NorVex-R");
+                        c.setRequestProperty("Accept", "application/vnd.github+json");
+                        c.setConnectTimeout(15000);
+                        c.setReadTimeout(15000);
+                        if (c.getResponseCode() != 200) return;
+                        InputStream in = c.getInputStream();
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                        byte[] buf = new byte[8192];
+                        int r;
+                        while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
+                        try { in.close(); } catch (Exception ignored) {}
+                        JSONObject rel = new JSONObject(bos.toString("UTF-8"));
+                        String tag = rel.optString("tag_name", "");
+                        int remote = parseTagCode(tag);
+                        if (remote <= 0) return;
+                        int mine = myVersionCode();
+                        if (remote <= mine) return;
+                        String apkUrl = null;
+                        try { apkUrl = rel.getJSONArray("assets").getJSONObject(0).getString("browser_download_url"); } catch (Exception ignored) {}
+                        if (apkUrl == null) return;
+                        final String fUrl = apkUrl, fTag = tag;
+                        main.post(new Runnable() {
+                            @Override public void run() { showUpdateDialog(fUrl, fTag); }
+                        });
+                    } catch (Exception e) { logError("update-check", e.toString()); }
+                }
+            }).start();
+        } catch (Throwable t) { logError("update-check", String.valueOf(t)); }
+    }
+
+    private int parseTagCode(String tag) {
+        try {
+            tag = tag.trim();
+            if (tag.startsWith("b") || tag.startsWith("v")) tag = tag.substring(1);
+            return Integer.parseInt(tag.replaceAll("[^0-9]", ""));
+        } catch (Exception e) { return -1; }
+    }
+
+    private int myVersionCode() {
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= 28) return (int) pi.getLongVersionCode();
+            return pi.versionCode;
+        } catch (Exception e) { return 0; }
+    }
+
+    private void showUpdateDialog(final String apkUrl, String tag) {
+        try {
+            AlertDialog d = new AlertDialog.Builder(this)
+                    .setTitle("Update tersedia (" + tag + ")")
+                    .setMessage("Unduh dan pasang versi baru?")
+                    .setPositiveButton("Unduh", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface di, int w) { startUpdateDownload(apkUrl); }
+                    })
+                    .setNegativeButton("Nanti", null)
+                    .setCancelable(true)
+                    .create();
+            pushDialog(d);
+            d.show();
+        } catch (Throwable t) { logError("update-dlg", String.valueOf(t)); }
+    }
+
+    private void startUpdateDownload(String apkUrl) {
+        try {
+            taskStart("update", "Mengunduh update…");
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) { taskEnd("update"); return; }
+            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(apkUrl));
+            r.setTitle("NorVex-R update");
+            r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            File dir = new File(getExternalFilesDir(null), "update");
+            dir.mkdirs();
+            r.setDestinationInExternalFilesDir(this, null, "update/norvex-r.apk");
+            updateDownloadId = dm.enqueue(r);
+            toast("Mengunduh update…");
+        } catch (Throwable t) {
+            taskEnd("update");
+            logError("update-dl", String.valueOf(t));
+        }
+    }
+
+    private final BroadcastReceiver dlReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            try {
+                if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
+                long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                taskEnd("dl-http");
+                if (id == updateDownloadId && id != -1) {
+                    updateDownloadId = -1;
+                    taskEnd("update");
+                    File apk = new File(getExternalFilesDir(null), "update/norvex-r.apk");
+                    if (apk.exists()) promptInstall(apk);
+                }
+            } catch (Throwable t) { logError("receiver", String.valueOf(t)); }
+        }
+    };
+
+    private void promptInstall(File apk) {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                try {
+                    if (!getPackageManager().canRequestPackageInstalls()) {
+                        Intent s = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getPackageName()));
+                        try { startActivity(s); } catch (Exception ignored) {}
+                        toast("Izinkan aplikasi ini memasang update, lalu tekan unduh lagi");
+                        return;
+                    }
+                } catch (Exception ignored) {}
+            }
+            Uri uri = MiniFileProvider.uriFor(this, apk);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try { startActivity(i); }
+            catch (ActivityNotFoundException e) { toast("Tak ada pemasang paket"); logError("install", e.toString()); }
+        } catch (Throwable t) { logError("install", String.valueOf(t)); }
+    }
+
+    // ---------------- Back bertingkat ----------------
+
+    @Override
+    public void onBackPressed() {
+        // 1. Dialog native teratas (pratinjau/error/update/keluar): tutup.
+        try {
+            for (int i = dialogStack.size() - 1; i >= 0; i--) {
+                Dialog d = dialogStack.get(i);
+                if (d != null && d.isShowing()) {
+                    try { d.dismiss(); } catch (Exception ignored) {}
+                    return;
+                }
+            }
+        } catch (Exception ignored) {}
+        // 2. WebView bisa kembali? kembali (riwayat halaman).
+        // (Catatan: pop-up web ditangani langkah 3 — riwayat web jarang dipakai.)
+        // 3. Tanya web: tutup pop-up teratas / minta-save / boleh keluar?
+        try {
+            web.evaluateJavascript("try{window.__norvexBack?window.__norvexBack():\"{\\\"exit\\\":true}\"}catch(e){\"{\\\"exit\\\":true}\"}",
+                    new ValueCallback<String>() {
+                        @Override public void onReceiveValue(String v) { onBackAnswer(v); }
+                    });
+        } catch (Throwable t) {
+            showExitConfirm();
+        }
+    }
+
+    private void onBackAnswer(String v) {
+        try {
+            boolean exit = true;
+            try {
+                if (v != null && v.length() > 2) {
+                    String unq = JSONObject.quote(v);
+                    JSONObject o = new JSONObject(v);
+                    exit = o.optBoolean("exit", true);
+                }
+            } catch (Exception e) { exit = true; }
+            if (exit) showExitConfirm();
+            // handled=true -> web sudah menutup sesuatu, tak perlu apa-apa.
+        } catch (Throwable t) { showExitConfirm(); }
+    }
+
+    private void showExitConfirm() {
+        try {
+            AlertDialog d = new AlertDialog.Builder(this)
+                    .setTitle("Keluar aplikasi?")
+                    .setMessage("State tersimpan otomatis — lanjutkan lagi nanti dari titik yang sama.")
+                    .setPositiveButton("Keluar", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface di, int w) { finish(); }
+                    })
+                    .setNegativeButton("Tetap", null)
+                    .setCancelable(true)
+                    .create();
+            pushDialog(d);
+            d.show();
+        } catch (Throwable t) { try { finish(); } catch (Exception ignored) {} }
+    }
+
+    private void pushDialog(Dialog d) {
+        try {
+            dialogStack.add(d);
+            d.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(DialogInterface di) {
+                    try { dialogStack.remove(di); } catch (Exception ignored) {}
+                }
+            });
+        } catch (Exception ignored) {}
+    }
+
+    private void closeDialogType(Class<?> cls) {
+        try {
+            for (int i = dialogStack.size() - 1; i >= 0; i--) {
+                Dialog d = dialogStack.get(i);
+                if (d != null && cls.isInstance(d)) { try { d.dismiss(); } catch (Exception ignored) {} }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // ---------------- Activity ----------------
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        hideNav();
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -134,29 +769,53 @@ public class MainActivity extends Activity {
 
         web.addJavascriptInterface(bridge, "AppInventor");
 
+        // WebView adalah isi utama app: jangan matikan proses tampilannya selagi dipakai.
+        if (Build.VERSION.SDK_INT >= 26) {
+            try { web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true); } catch (Exception ignored) {}
+        }
+
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 startGreeting();
+                injectHideFilters();
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 String u = (req != null && req.getUrl() != null) ? req.getUrl().toString() : "";
-                // http(s) tetap di dalam; skema lain (tel:, intent:, dsb) lempar ke sistem.
                 if (u.startsWith("http://") || u.startsWith("https://")) return false;
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
                 } catch (ActivityNotFoundException ignored) {}
                 return true;
             }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest req, android.webkit.WebResourceError err) {
+                try {
+                    boolean main = (req == null) || req.isForMainFrame();
+                    String msg = "halaman: " + (err == null ? "?" : String.valueOf(err.getDescription()));
+                    logError("webview", msg);
+                    if (main) showErrorDialog("Gagal membuka halaman. Periksa koneksi lalu buka lagi.");
+                } catch (Throwable t) { logError("webview", String.valueOf(t)); }
+            }
         });
 
         web.setWebChromeClient(new WebChromeClient() {
             @Override
-            public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb,
-                                             FileChooserParams params) {
+            public boolean onConsoleMessage(ConsoleMessage m) {
+                try {
+                    if (m != null && m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                        logError("web-console", String.valueOf(m.message()));
+                    }
+                } catch (Exception ignored) {}
+                return super.onConsoleMessage(m);
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams params) {
                 if (fileCb != null) { try { fileCb.onReceiveValue(null); } catch (Exception ignored) {} }
                 fileCb = cb;
                 try {
@@ -172,36 +831,64 @@ public class MainActivity extends Activity {
             }
         });
 
-        // Jaring pengaman: unduhan yang lolos dari intersepsi web.
+        // Jaring pengaman: unduhan http yang lolos dari intersepsi web.
         web.setDownloadListener(new DownloadListener() {
             @Override
             public void onDownloadStart(String url, String userAgent,
                                         String contentDisposition, String mime, long len) {
-                if (url == null || !url.startsWith("http")) return; // blob: tak tertangani
+                if (url == null || !url.startsWith("http")) return; // blob: ditangani chunked
                 String name = "download";
                 try {
                     String d = android.webkit.URLUtil.guessFileName(url, contentDisposition, mime);
                     if (d != null && !d.isEmpty()) name = d;
                 } catch (Exception ignored) {}
-                startDownload(url, name, mime == null ? "" : mime);
+                startDownloadHttp(url, name, mime == null ? "" : mime);
             }
         });
+
+        try { registerReceiver(dlReceiver, new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)); } catch (Exception ignored) {}
+
+        // Privasi: pastikan .nomedia ada (sejak awal, bukan saat unduh pertama).
+        try {
+            File base = baseDirExternal();
+            if (base != null) ensureNoMedia(new File(base, "download"));
+        } catch (Exception ignored) {}
 
         if (b == null) {
             web.loadUrl(START_URL);
         } else {
-            web.restoreState(b);
+            try { web.restoreState(b); } catch (Exception e) { web.loadUrl(START_URL); }
         }
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                try { requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 7); } catch (Exception ignored) {}
-            }
-        }
+        checkUpdate();
     }
 
-    /** Dorong sapaan beberapa kali (tahan HP lambat), lalu berhenti total. */
+    private void hideNav() {
+        try {
+            final int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_FULLSCREEN;
+            getWindow().getDecorView().setSystemUiVisibility(flags);
+            if (Build.VERSION.SDK_INT >= 28) {
+                try {
+                    getWindow().getAttributes().layoutInDisplayCutoutMode =
+                            android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_SHORT_EDGES;
+                    getWindow().setAttributes(getWindow().getAttributes());
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideNav(); // jaga fullscreen (mis. setelah dialog sistem)
+    }
+
+    /** Dorong sapaan native (superset is_mit) beberapa kali, lalu berhenti total. */
     private void startGreeting() {
         greetLeft = GREET_TIMES;
         main.removeCallbacks(greetRun);
@@ -213,28 +900,23 @@ public class MainActivity extends Activity {
         public void run() {
             if (greetLeft <= 0) return;
             greetLeft--;
-            try { bridge.greet(); } catch (Exception ignored) {}
+            try { bridge.greetNative(); } catch (Exception ignored) {}
             if (greetLeft > 0) main.postDelayed(this, GREET_EVERY_MS);
         }
     };
 
-    private void startDownload(String url, String filename, String mime) {
-        if (url == null || !url.startsWith("http")) return;
-        if (filename == null || filename.isEmpty()) filename = "download";
+    // Filter halaman (gaya ublock "###"): elemen ber-ID ini disembunyikan dari web.
+    private static final String HIDE_CSS =
+            "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
+            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El{display:none!important}";
+
+    private void injectHideFilters() {
         try {
-            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-            if (dm == null) return;
-            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
-            r.setTitle(filename);
-            r.setDescription("Roleplay AI");
-            r.setNotificationVisibility(
-                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            try { r.setDestinationInExternalPublicDir(
-                    Environment.DIRECTORY_DOWNLOADS,
-                    "perchance_app/Roleplay/" + filename); } catch (Exception ignored) {}
-            if (mime != null && !mime.isEmpty()) { try { r.setMimeType(mime); } catch (Exception ignored) {} }
-            try { r.allowScanningByMediaScanner(); } catch (Exception ignored) {}
-            dm.enqueue(r);
+            String js = "(function(){var s=document.getElementById('norvex-hide');" +
+                    "if(!s){s=document.createElement('style');s.id='norvex-hide';" +
+                    "document.documentElement.appendChild(s);}" +
+                    "s.textContent='" + HIDE_CSS + "';})();";
+            web.evaluateJavascript(js, null);
         } catch (Exception ignored) {}
     }
 
@@ -248,19 +930,37 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    @Override
-    public void onBackPressed() {
-        // 1. Pratinjau web: minta tutup (web yang menutup layarnya sendiri).
-        if (previewActive) {
-            try { bridge.webViewString = "{\"is_preview\":false}"; } catch (Exception ignored) {}
-            return;
-        }
-        // 2. WebView masih bisa kembali: kembali.
+    private void toast(final String msg) {
+        try { Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); } catch (Exception ignored) {}
+    }
+
+    private void ensureNotifPerm() {
+        if (notifAsked) return;
+        notifAsked = true;
         try {
-            if (web != null && web.canGoBack()) { web.goBack(); return; }
+            if (Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 7);
+            }
         } catch (Exception ignored) {}
-        // 3. Mentok: keluar aplikasi (perilaku Back Android normal).
-        super.onBackPressed();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Checkpoint: minta web simpan state/backup SEKARANG (baterai aman, cepat).
+        if (!pausedCheckpointSent) {
+            pausedCheckpointSent = true;
+            try { web.evaluateJavascript("try{window.__norvexCheckpoint&&window.__norvexCheckpoint()}catch(e){}", null); } catch (Exception ignored) {}
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        pausedCheckpointSent = false;
+        hideNav();
     }
 
     @Override
@@ -288,6 +988,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        try { unregisterReceiver(dlReceiver); } catch (Exception ignored) {}
         try {
             main.removeCallbacks(greetRun);
             if (web != null) {
