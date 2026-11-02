@@ -46,21 +46,31 @@ public class TaskService extends Service {
                     tasks.remove(id);
                 }
             }
+            // WAJIB DULUAN: sistem (Android 8+) menuntut startForeground() dalam
+            // hitungan detik setiap startForegroundService() — BAHKAN saat tugas
+            // sudah habis dan service mau berhenti. Kalau dilewati, sistem
+            // melempar RemoteServiceException = force close (biang crash b23-b27:
+            // taskEnd untuk tugas yang tak pernah dimulai -> stopSelf tanpa
+            // foreground -> mati). Jadi: foreground dulu, baru putuskan.
+            try {
+                ensureChannel();
+                Notification n = buildNotif();
+                if (n == null) n = fallbackNotif();
+                if (n != null) startForeground(NID, n);
+            } catch (Throwable t) {
+                try { android.util.Log.e("TaskService", "fg: " + t); } catch (Exception ignored) {}
+            }
             if (tasks.isEmpty()) {
                 try { stopForeground(true); } catch (Exception ignored) {}
                 stopSelf();
             } else {
-                ensureChannel();
-                Notification n = buildNotif();
-                try { startForeground(NID, n); }
-                catch (Exception e) {
-                    try {
-                        android.util.Log.e("TaskService", e.toString());
-                    } catch (Exception ignored) {}
-                }
                 try {
-                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-                    if (nm != null) nm.notify(NID, n);
+                    Notification n2 = buildNotif();
+                    if (n2 == null) n2 = fallbackNotif();
+                    if (n2 != null) {
+                        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                        if (nm != null) nm.notify(NID, n2);
+                    }
                 } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
@@ -103,6 +113,22 @@ public class TaskService extends Service {
                 .setSmallIcon(android.R.drawable.stat_sys_download)
                 .setOngoing(true);
         try { if (pi != null) b.setContentIntent(pi); } catch (Exception ignored) {}
-        try { return b.build(); } catch (Exception e) { return null; }
+        try { return b.build(); } catch (Exception e) { return fallbackNotif(); }
+    }
+
+    // Notifikasi darurat super-sederhana: dipakai bila buildNotif() gagal.
+    // startForeground() TAK BOLEH menerima null — null = crash RemoteService.
+    private Notification fallbackNotif() {
+        try {
+            ensureChannel();
+            Notification.Builder b;
+            if (Build.VERSION.SDK_INT >= 26) b = new Notification.Builder(this, CH);
+            else b = new Notification.Builder(this);
+            return b.setContentTitle("NorVex-R")
+                    .setContentText("Bekerja…")
+                    .setSmallIcon(android.R.drawable.stat_sys_download)
+                    .setOngoing(true)
+                    .build();
+        } catch (Exception ignored) { return null; }
     }
 }
