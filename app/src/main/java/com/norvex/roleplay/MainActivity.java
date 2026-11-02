@@ -33,6 +33,7 @@ import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -43,6 +44,7 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -55,10 +57,14 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * NorVex-R — aplikasi native (bukan MIT).
@@ -813,7 +819,6 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 trace("halaman selesai");
                 startGreeting();
-                injectHideFilters();
             }
 
             @Override
@@ -834,6 +839,42 @@ public class MainActivity extends Activity {
                     logError("webview", msg);
                     if (main) showErrorDialog("Gagal membuka halaman. Periksa koneksi lalu buka lagi.");
                 } catch (Throwable t) { logError("webview", String.valueOf(t)); }
+            }
+
+            // AdBlock level jaringan ala Sunny Gupta: cegat request iklan SEBELUM
+            // diunduh. Halaman utama tak pernah diblokir; gagal cocok -> teruskan.
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                try {
+                    if (BLOCK_ADS && req != null && req.getUrl() != null) {
+                        if (Build.VERSION.SDK_INT >= 21 && req.isForMainFrame()) return super.shouldInterceptRequest(view, req);
+                        String url = req.getUrl().toString();
+                        if (url != null && (url.startsWith("http://") || url.startsWith("https://"))
+                                && isAdHost(req.getUrl().getHost())) {
+                            trace("iklan diblokir: " + req.getUrl().getHost());
+                            WebResourceResponse empty = emptyBlockedResponse(url);
+                            if (empty != null) return empty;
+                        }
+                    }
+                } catch (Throwable t) { logError("adblock", String.valueOf(t)); }
+                try { return super.shouldInterceptRequest(view, req); } catch (Throwable t) { return null; }
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+                try {
+                    if (BLOCK_ADS && url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                        String host = null;
+                        try { host = android.net.Uri.parse(url).getHost(); } catch (Exception ignored) {}
+                        if (isAdHost(host)) {
+                            trace("iklan diblokir: " + host);
+                            WebResourceResponse empty = emptyBlockedResponse(url);
+                            if (empty != null) return empty;
+                        }
+                    }
+                } catch (Throwable t) { logError("adblock", String.valueOf(t)); }
+                try { return super.shouldInterceptRequest(view, url); } catch (Throwable t) { return null; }
             }
         });
 
@@ -975,20 +1016,66 @@ public class MainActivity extends Activity {
         }
     };
 
-    // Filter halaman (gaya ublock "###"): elemen ber-ID ini disembunyikan dari web.
-    private static final String HIDE_CSS =
-            "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
-            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El{display:none!important}";
+    // ---------------- AdBlock level jaringan (gaya Sunny Gupta) ----------------
+    // Request iklan dicegat SEBELUM diunduh (hemat kuota/RAM, halaman lebih cepat).
+    // Aturan = daftar host iklan (satu domain per baris). Subdomain ikut diblokir
+    // otomatis (mis. "doubleclick.net" menutup "googleads.g.doubleclick.net").
+    // Cara pasang rules sendiri: tambah baris domain di AD_HOSTS ini.
+    private static final boolean BLOCK_ADS = true; // saklar utama (false = mati total)
+    private static final Set<String> AD_HOSTS = new HashSet<String>(Arrays.asList(
+            "googleads.g.doubleclick.net",
+            "pagead2.googlesyndication.com",
+            "tpc.googlesyndication.com",
+            "googleadservices.com",
+            "adservice.google.com",
+            "imasdk.googleapis.com",
+            "amazon-adsystem.com",
+            "criteo.com",
+            "criteo.net",
+            "pubmatic.com",
+            "rubiconproject.com",
+            "openx.net",
+            "openx.com",
+            "adnxs.com",
+            "adsrvr.org",
+            "moatads.com",
+            "doubleverify.com",
+            "outbrain.com",
+            "taboola.com",
+            "revcontent.com",
+            "mgid.com",
+            "connect.facebook.net",
+            "adcolony.com",
+            "applovin.com",
+            "unityads.unity3d.com"
+    ));
 
-    private void injectHideFilters() {
+    private static boolean isAdHost(String host) {
         try {
-            String js = "(function(){var s=document.getElementById('norvex-hide');" +
-                    "if(!s){s=document.createElement('style');s.id='norvex-hide';" +
-                    "document.documentElement.appendChild(s);}" +
-                    "s.textContent='" + HIDE_CSS + "';})();";
-            web.evaluateJavascript(js, null);
-            trace("filter disuntik");
+            if (!BLOCK_ADS || host == null) return false;
+            String h = host.trim().toLowerCase();
+            if (h.isEmpty()) return false;
+            for (String rule : AD_HOSTS) {
+                if (h.equals(rule) || h.endsWith("." + rule)) return true;
+            }
         } catch (Exception ignored) {}
+        return false;
+    }
+
+    // Balasan kosong yang valid (200 OK): WebView anggap request selesai normal,
+    // bukan koneksi putus — ini pencegah crash ala Sunny Gupta.
+    private static WebResourceResponse emptyBlockedResponse(String url) {
+        try {
+            String mime = "text/plain";
+            if (url != null) {
+                String u = url.toLowerCase();
+                if (u.contains(".js")) mime = "application/javascript";
+                else if (u.contains(".css")) mime = "text/css";
+                else if (u.contains(".png") || u.contains(".jpg") || u.contains(".gif") || u.contains(".webp")) mime = "image/png";
+            }
+            return new WebResourceResponse(mime, "UTF-8", new ByteArrayInputStream(new byte[0]));
+        } catch (Exception ignored) {}
+        return null;
     }
 
     private void hideKeyboard() {
