@@ -131,6 +131,12 @@ public class MainActivity extends Activity {
         try {
             JSONObject o;
             try { o = new JSONObject(s); } catch (Exception e) { return; } // bukan JSON: abaikan
+            try {
+                java.util.Iterator<String> ks = o.keys();
+                StringBuilder kb = new StringBuilder();
+                while (ks.hasNext()) { if (kb.length() > 0) kb.append(","); kb.append(ks.next()); }
+                trace("pesan: " + kb.toString());
+            } catch (Exception ignored) {}
             if (o.has("file_start")) { onFileStart(o.optJSONObject("file_start")); return; }
             if (o.has("file_chunk")) { onFileChunk(o.optJSONObject("file_chunk")); return; }
             if (o.has("file_end")) { onFileEnd(o.optJSONObject("file_end")); return; }
@@ -216,7 +222,7 @@ public class MainActivity extends Activity {
                 try { st.partFile.delete(); } catch (Exception ignored) {}
                 String loc = locationLabel(dest);
                 toast("Tersimpan: " + loc + "/" + dest.getName());
-            } catch (Exception e) {
+                trace("file tersimpan: " + dest.getName());            } catch (Exception e) {
                 toast("Gagal menyimpan " + st.name);
                 logError("file_end", e.toString());
             }
@@ -333,6 +339,7 @@ public class MainActivity extends Activity {
             if (mime != null && !mime.isEmpty()) { try { r.setMimeType(mime); } catch (Exception ignored) {} }
             dm.enqueue(r);
             toast("Mengunduh " + safe + " ke perchance_app/Roleplay/download");
+            trace("unduh http mulai: " + safe);
         } catch (Exception e) {
             toast("Unduhan gagal dimulai");
             logError("download-http", e.toString());
@@ -485,6 +492,7 @@ public class MainActivity extends Activity {
     }
 
     private void logError(String tag, String msg) {
+        trace(tag + ": " + shortMsg(msg));
         try {
             String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
             String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
@@ -499,8 +507,23 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    private void showErrorDialog(final String msg) {
+    // Jejak langkah (untuk buru force-close): ringan, selalu ditulis.
+    private void trace(String msg) {
         try {
+            String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+            String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+            File f = new File(errorDir(), "trace-" + day + ".txt");
+            FileOutputStream out = null;
+            try {
+                out = new FileOutputStream(f, true);
+                out.write(("[" + ts + "] " + msg + "\n").getBytes("UTF-8"));
+            } finally {
+                try { if (out != null) out.close(); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void showErrorDialog(final String msg) {        try {
             long now = System.currentTimeMillis();
             if (now - lastErrorDialogAt < 5000) { // anti-spam: 1 dialog per 5 dtk
                 toast("Galat: " + shortMsg(msg));
@@ -557,11 +580,12 @@ public class MainActivity extends Activity {
                         int remote = parseTagCode(tag);
                         if (remote <= 0) return;
                         int mine = myVersionCode();
-                        if (remote <= mine) return;
+                        if (remote <= mine) { trace("cek update: sudah terbaru"); return; }
                         String apkUrl = null;
                         try { apkUrl = rel.getJSONArray("assets").getJSONObject(0).getString("browser_download_url"); } catch (Exception ignored) {}
                         if (apkUrl == null) return;
                         final String fUrl = apkUrl, fTag = tag;
+                        trace("update tersedia: " + fTag);
                         main.post(new Runnable() {
                             @Override public void run() { showUpdateDialog(fUrl, fTag); }
                         });
@@ -745,6 +769,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         hookCrashLogger(); // catat biang force-close ke folder error/
+        trace("boot mulai");
         hideNav();
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new FrameLayout.LayoutParams(
@@ -781,6 +806,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                trace("halaman selesai");
                 startGreeting();
                 injectHideFilters();
             }
@@ -866,6 +892,7 @@ public class MainActivity extends Activity {
 
         if (b == null) {
             web.loadUrl(START_URL);
+            trace("web dibuka");
         } else {
             try { web.restoreState(b); } catch (Exception e) { web.loadUrl(START_URL); }
         }
@@ -938,7 +965,7 @@ public class MainActivity extends Activity {
         public void run() {
             if (greetLeft <= 0) return;
             greetLeft--;
-            try { bridge.greetNative(); } catch (Exception ignored) {}
+            try { bridge.greetNative(); trace("salam native"); } catch (Exception ignored) {}
             if (greetLeft > 0) main.postDelayed(this, GREET_EVERY_MS);
         }
     };
@@ -955,6 +982,7 @@ public class MainActivity extends Activity {
                     "document.documentElement.appendChild(s);}" +
                     "s.textContent='" + HIDE_CSS + "';})();";
             web.evaluateJavascript(js, null);
+            trace("filter disuntik");
         } catch (Exception ignored) {}
     }
 
@@ -987,6 +1015,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        trace("jeda");
         // Checkpoint: minta web simpan state/backup SEKARANG (baterai aman, cepat).
         if (!pausedCheckpointSent) {
             pausedCheckpointSent = true;
