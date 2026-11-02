@@ -1363,17 +1363,26 @@ public class MainActivity extends Activity {
     // ---------------- Cosmetic (rules elemen ala uBlock: domain###id) ----------------
     // Elemen milik halaman sendiri (bukan request iklan) tak bisa diblokir di
     // level jaringan — caranya disembunyikan via CSS, persis seperti
-    // injectCosmeticHelper-nya Sunny Gupta. Daftar dari user (6 rules).
+    // injectCosmeticHelper-nya Sunny Gupta. Daftar: 6 rules dari user +
+    // semua chrome Perchance (bar menu, tombol mode, konsol editor, pemutar
+    // iklan, header/footer/navigasi) agar aplikasi kelihatan mandiri.
+    // AMAN: iframe generator (#outputIframeEl di dalam #output/#main) tak
+    // pernah disentuh — yang disembunyikan hanya kulit luarnya.
     private static final String COSMETIC_CSS =
             "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
-            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El{display:none!important}";
+            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El," +
+            "#menuBarEl,#editorEl,#perchanceConsoleEl,#output-buttons-ctn," +
+            "#outputLoadSpinner,#sandboxed-ad-provider-ctn-el," +
+            "header,footer,nav{display:none!important}";
 
     private void injectCosmetic() {
         try {
             String js = "(function(){var s=document.getElementById('norvex-hide');" +
                     "if(!s){s=document.createElement('style');s.id='norvex-hide';" +
                     "document.documentElement.appendChild(s);}" +
-                    "s.textContent='" + COSMETIC_CSS + "';})();";
+                    "s.textContent='" + COSMETIC_CSS + "';" +
+                    "try{document.title='NorVex-R';}catch(e){}" +
+                    "})();";
             web.evaluateJavascript(js, null);
         } catch (Exception ignored) {}
     }
