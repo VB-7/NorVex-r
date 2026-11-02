@@ -1600,12 +1600,25 @@ public class MainActivity extends Activity {
     // otomatis (mis. "doubleclick.net" menutup "googleads.g.doubleclick.net").
     // Cara pasang rules sendiri: tambah baris domain di AD_HOSTS ini.
     private static final boolean BLOCK_ADS = true; // saklar utama (false = mati total)
+    // Tambahan Nov 2026 (temuan log HP: host ini gagal koneksi BERULANG =
+    // makan RAM + lambat + banjiri log; ketiganya pelacak/iklan murni,
+    // bukan fungsi halaman): analytics + gtag + doubleclick-root +
+    // cloudflare-beacon + vlitag + facebook-pixel.
     private static final Set<String> AD_HOSTS = new HashSet<String>(Arrays.asList(
             "googleads.g.doubleclick.net",
             "pagead2.googlesyndication.com",
             "tpc.googlesyndication.com",
+            "googlesyndication.com",
+            "doubleclick.net",
             "googleadservices.com",
             "adservice.google.com",
+            "google-analytics.com",
+            "analytics.google.com",
+            "stats.g.doubleclick.net",
+            "googletagmanager.com",
+            "cloudflareinsights.com",
+            "vlitag.com",
+            "facebook.net",
             "imasdk.googleapis.com",
             "amazon-adsystem.com",
             "criteo.com",
