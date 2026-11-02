@@ -648,13 +648,21 @@ public class MainActivity extends Activity {
                     readyShown = true;
                     try { main.removeCallbacks(showWebDelayed); } catch (Exception ignored) {}
                     try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
-                    try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Exception ignored) {}
+                    try { if (web != null) web.setAlpha(1f); } catch (Exception ignored) {}
+                    // Jeda 150ms SEBELUM tirai dibuka: biar frame pertama selesai
+                    // digambar GPU (anti kedip hitam). Splash tetap menutup penuh.
                     try {
-                        if (splashView != null && splashView.getParent() != null) {
-                            ((ViewGroup) splashView.getParent()).removeView(splashView);
-                        }
-                        splashView = null;
-                        splashStatus = null;
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    if (splashView != null && splashView.getParent() != null) {
+                                        ((ViewGroup) splashView.getParent()).removeView(splashView);
+                                    }
+                                    splashView = null;
+                                    splashStatus = null;
+                                } catch (Exception ignored) {}
+                            }
+                        }, 150);
                     } catch (Exception ignored) {}
                     trace("web siap, splash tutup");
                 }
@@ -1084,7 +1092,7 @@ public class MainActivity extends Activity {
                 try { splashView.setOnClickListener(null); } catch (Exception ignored) {}
             }
             if (web != null) {
-                try { web.setVisibility(View.INVISIBLE); } catch (Exception ignored) {}
+                try { web.setAlpha(0f); } catch (Exception ignored) {}
                 try { web.reload(); } catch (Exception ignored) {}
             }
             try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
@@ -1118,7 +1126,7 @@ public class MainActivity extends Activity {
                 try { splashStatus.setText(crash ? "Kehabisan memori, memuat ulang…" : "Memuat ulang… 0%"); } catch (Exception ignored) {}
             }
             if (web != null) {
-                try { web.setVisibility(View.INVISIBLE); } catch (Exception ignored) {}
+                try { web.setAlpha(0f); } catch (Exception ignored) {}
                 try { web.reload(); } catch (Exception ignored) {}
             }
             main.postDelayed(absoluteFallback, 60000);
@@ -1231,7 +1239,11 @@ public class MainActivity extends Activity {
         ensureStoragePerm(); // minta izin tulis SEKALI (HP Android 9/10)
 
         web = new WebView(this);
-        web.setVisibility(View.INVISIBLE); // tertutup splash sampai web kirim app_ready
+        // WebView TETAP visible (jangan INVISIBLE/GONE!): GPU Android melewatkan
+        // render komponen yang disembunyikan, sehingga pas dibuka butuh redraw
+        // = kedip hitam. Trik: tetap VISIBLE tapi alpha 0 (transparan) — GPU
+        // terus menggambar di background, pas dijernihkan langsung ada isinya.
+        web.setAlpha(0f);
         root.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
