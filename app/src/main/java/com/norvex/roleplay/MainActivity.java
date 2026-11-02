@@ -1128,9 +1128,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
-                // Suntik AWAL (spinner luar muncul 1,5 dtk setelah buka —
-                // kalau nunggu selesai, sempat kelihatan).
-                injectCosmetic();
+                injectCosmetic(); // suntik awal (spinner luar cepat muncul)
             }
 
             @Override
@@ -1142,9 +1140,6 @@ public class MainActivity extends Activity {
                 injectCosmetic();
                 // Halaman selesai -> tuduhan galat tadi batal (flaky sesaat).
                 try { main.removeCallbacks(errorDlgDelayed); } catch (Exception ignored) {}
-            // Halaman selesai -> salam native + kosmetik + batalkan tuduhan galat.
-                try {
-                } catch (Exception ignored) {}
             }
 
             @Override
@@ -1180,10 +1175,8 @@ public class MainActivity extends Activity {
                 } catch (Throwable t) { logError("webview", String.valueOf(t)); }
             }
 
-            // Proses tampil MATI (khas HP RAM kecil: sistem membunuh renderer
-            // saat sesak — gejala persis "web sempat berkedip lalu hitam
-            // selamanya", tanpa dialog/crash). Pulihkan: splash lagi + muat
-            // ulang, JANGAN diam hitam.
+            // Proses tampil MATI (tanpa dialog/crash). Pulihkan: WebView baru +
+            // muat ulang, JANGAN diam hitam.
             @Override
             public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
                 try {
@@ -1204,8 +1197,13 @@ public class MainActivity extends Activity {
             @Override
             public boolean onConsoleMessage(ConsoleMessage m) {
                 try {
-                    if (m != null && m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
-                        logError("web-console", String.valueOf(m.message()));
+                    if (m != null) {
+                        // Error: seperti dulu. Info "load log:": breadcrumb boot
+                        // web (sementara b46, untuk tahu langkah boot yang macet).
+                        boolean isErr = m.messageLevel() == ConsoleMessage.MessageLevel.ERROR;
+                        boolean isBoot = false;
+                        try { isBoot = String.valueOf(m.message()).startsWith("load log:"); } catch (Exception ignored) {}
+                        if (isErr || isBoot) logError("web-console", String.valueOf(m.message()));
                     }
                 } catch (Exception ignored) {}
                 return super.onConsoleMessage(m);
@@ -1434,6 +1432,11 @@ public class MainActivity extends Activity {
             "html,body{background:#000!important}";
 
     private void injectCosmetic() {
+        // DIAGNOSIS b46 (sementara!): suntik CSS DIMATIKAN total — rules user
+        // (COSMETIC_CSS di bawah) utuh tersimpan, dipasang lagi setelah biang
+        // hitam ketemu. Kalau tanpa suntik web tampil = CSS biangnya.
+        // Kalau tetap hitam = biang di wrapper/WebView, bukan CSS.
+        if (true) return;
         try {
             // documentElement bisa null bila disuntik di onPageStarted
             // (terlalu awal) -> lewati saja, onPageFinished menyuntik lagi.
