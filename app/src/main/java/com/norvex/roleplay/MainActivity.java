@@ -875,7 +875,7 @@ public class MainActivity extends Activity {
             if (Build.VERSION.SDK_INT >= 28) {
                 try {
                     getWindow().getAttributes().layoutInDisplayCutoutMode =
-                            android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_SHORT_EDGES;
+                            android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
                     getWindow().setAttributes(getWindow().getAttributes());
                 } catch (Exception ignored) {}
             }
