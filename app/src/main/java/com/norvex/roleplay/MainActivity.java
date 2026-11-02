@@ -1418,24 +1418,17 @@ public class MainActivity extends Activity {
     // ---------------- Cosmetic (rules elemen ala uBlock: domain###id) ----------------
     // Elemen milik halaman sendiri (bukan request iklan) tak bisa diblokir di
     // level jaringan — caranya disembunyikan via CSS, persis seperti
-    // injectCosmeticHelper-nya Sunny Gupta. Daftar: 6 rules dari user +
-    // semua chrome Perchance (bar menu, tombol mode, konsol editor, pemutar
-    // iklan, header/footer/navigasi) agar aplikasi kelihatan mandiri.
-    // AMAN: iframe generator (#outputIframeEl di dalam #output/#main) tak
-    // pernah disentuh — yang disembunyikan hanya kulit luarnya.
-    // b47: header/footer/nav DICABUT dari daftar (tersangka biang hitam b46).
-    // Kalau b47 tampil bersih = dia biangnya, jangan dipasang lagi.
+    // injectCosmeticHelper-nya Sunny Gupta. b48 (copas AIA 1:1, user minta):
+    // HANYA 6 rules user, TANPA background, TANPA ubah title. Buktinya:
+    // b46 (tanpa suntik) tampil, b45+b47 (suntik+tambahan) hitam — jadi semua
+    // tambahan (7 ID chrome, background hitam, title) DIBUANG, tinggal yang
+    // terbukti aman di aplikasi MIT user.
     private static final String COSMETIC_CSS =
             "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
-            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El," +
-            "#menuBarEl,#editorEl,#perchanceConsoleEl,#output-buttons-ctn," +
-            "#outputLoadSpinner,#sandboxed-ad-provider-ctn-el{display:none!important}" +
-            "html,body{background:#000!important}";
+            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El{display:none!important}";
 
     private void injectCosmetic() {
-        // b47: suntik DINYALAKAN LAGI, tapi TANPA header/footer/nav (tersangka
-        // utama b46 — elemen struktural yang dipakai Perchance menata layout).
-        // Rules user (6) + chrome Perchance tetap disembunyikan.
+        // b48: suntik HANYA 6 rules user — sama persis dgn aplikasi MIT.
         try {
             // documentElement bisa null bila disuntik di onPageStarted
             // (terlalu awal) -> lewati saja, onPageFinished menyuntik lagi.
@@ -1444,7 +1437,6 @@ public class MainActivity extends Activity {
                     "if(!s){s=document.createElement('style');s.id='norvex-hide';" +
                     "document.documentElement.appendChild(s);}" +
                     "s.textContent='" + COSMETIC_CSS + "';" +
-                    "try{document.title='NorVex-R';}catch(e){}" +
                     "})();";
             web.evaluateJavascript(js, null);
         } catch (Exception ignored) {}
