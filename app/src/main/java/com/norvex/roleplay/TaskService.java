@@ -66,11 +66,24 @@ public class TaskService extends Service {
             // melempar RemoteServiceException = force close (biang crash b23-b27:
             // taskEnd untuk tugas yang tak pernah dimulai -> stopSelf tanpa
             // foreground -> mati). Jadi: foreground dulu, baru putuskan.
+            // KERAS: startForeground SENDIRI bisa melempar (channel hilang,
+            // notif cacat) -> coba lapis cadangan, JANGAN pernah lewat tanpa
+            // foreground sukses (itu yang meledak di crash 19:34).
             try {
                 ensureChannel();
-                Notification n = buildNotif();
-                if (n == null) n = fallbackNotif();
-                if (n != null) startForeground(NID, n);
+                Notification n = null;
+                try { n = buildNotif(); } catch (Throwable t2) { n = null; }
+                if (n == null) { try { n = fallbackNotif(); } catch (Throwable t3) { n = null; } }
+                if (n != null) {
+                    try {
+                        startForeground(NID, n);
+                    } catch (Throwable t4) {
+                        try {
+                            Notification f2 = fallbackNotif();
+                            if (f2 != null) startForeground(NID, f2);
+                        } catch (Throwable ignored) {}
+                    }
+                }
             } catch (Throwable t) {
                 try { android.util.Log.e("TaskService", "fg: " + t); } catch (Exception ignored) {}
             }
