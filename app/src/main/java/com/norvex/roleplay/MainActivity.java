@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
     private boolean pausedCheckpointSent = false;
     private long lastErrorDialogAt = 0;
     private long updateDownloadId = -1;
+    private static final String UPD_PREF_TAG = "upd_tag"; // tag APK update yg sudah terunduh
 
     // ---------------- Jembatan JS (nama sama dengan MIT: window.AppInventor) ----------------
 
@@ -564,7 +565,7 @@ public class MainActivity extends Activity {
         try {
             SharedPreferences sp = getSharedPreferences("nv", MODE_PRIVATE);
             long last = sp.getLong("upd_last", 0);
-            if (System.currentTimeMillis() - last < 24L * 3600 * 1000) return;
+            if (System.currentTimeMillis() - last < 1L * 3600 * 1000) return;
             sp.edit().putLong("upd_last", System.currentTimeMillis()).apply();
             new Thread(new Runnable() {
                 @Override public void run() {
@@ -594,7 +595,7 @@ public class MainActivity extends Activity {
                         final String fUrl = apkUrl, fTag = tag;
                         trace("update tersedia: " + fTag);
                         main.post(new Runnable() {
-                            @Override public void run() { showUpdateDialog(fUrl, fTag); }
+                            @Override public void run() { onUpdateFound(fUrl, fTag); }
                         });
                     } catch (Exception e) { logError("update-check", e.toString()); }
                 }
@@ -618,19 +619,40 @@ public class MainActivity extends Activity {
         } catch (Exception e) { return 0; }
     }
 
-    private void showUpdateDialog(final String apkUrl, String tag) {
+    // Update OTOMATIS: ketemu versi baru -> langsung unduh di dalam aplikasi
+    // (tanpa buka GitHub, tanpa ditanya). Kalau file tag ini sudah ada -> ajak
+    // pasang. Kalau sedang mengunduh -> biarkan jalan.
+    private void onUpdateFound(String apkUrl, String tag) {
+        try {
+            File apk = new File(new File(getExternalFilesDir(null), "update"), "norvex-r.apk");
+            SharedPreferences sp = getSharedPreferences("nv", MODE_PRIVATE);
+            String have = sp.getString(UPD_PREF_TAG, "");
+            if (tag.equals(have) && apk.exists() && apk.length() > 0) {
+                showUpdateReadyDialog(apk, tag);
+                return;
+            }
+            if (updateDownloadId != -1) { toast("Update " + tag + " masih mengunduh…"); return; }
+            sp.edit().putString(UPD_PREF_TAG, tag).apply();
+            toast("Update " + tag + " ditemukan, mengunduh…");
+            trace("update mengunduh: " + tag);
+            startUpdateDownload(apkUrl);
+        } catch (Throwable t) { logError("update-found", String.valueOf(t)); }
+    }
+
+    private void showUpdateReadyDialog(final File apk, String tag) {
         try {
             AlertDialog d = new AlertDialog.Builder(this)
-                    .setTitle("Update tersedia (" + tag + ")")
-                    .setMessage("Unduh dan pasang versi baru?")
-                    .setPositiveButton("Unduh", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface di, int w) { startUpdateDownload(apkUrl); }
+                    .setTitle("Update " + tag + " siap dipasang")
+                    .setMessage("Sudah terunduh di dalam aplikasi (tanpa buka GitHub). Pasang sekarang? (Android mewajibkan 1 ketukan + izin pasang sekali saja)")
+                    .setPositiveButton("Pasang", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface di, int w) { promptInstall(apk); }
                     })
                     .setNegativeButton("Nanti", null)
                     .setCancelable(true)
                     .create();
             pushDialog(d);
             d.show();
+            trace("update siap: " + tag);
         } catch (Throwable t) { logError("update-dlg", String.valueOf(t)); }
     }
 
@@ -646,7 +668,6 @@ public class MainActivity extends Activity {
             dir.mkdirs();
             r.setDestinationInExternalFilesDir(this, null, "update/norvex-r.apk");
             updateDownloadId = dm.enqueue(r);
-            toast("Mengunduh update…");
         } catch (Throwable t) {
             taskEnd("update");
             logError("update-dl", String.valueOf(t));
@@ -664,7 +685,10 @@ public class MainActivity extends Activity {
                     updateDownloadId = -1;
                     taskEnd("update");
                     File apk = new File(getExternalFilesDir(null), "update/norvex-r.apk");
-                    if (apk.exists()) promptInstall(apk);
+                    String tag = "";
+                    try { tag = getSharedPreferences("nv", MODE_PRIVATE).getString(UPD_PREF_TAG, ""); } catch (Exception ignored) {}
+                    if (apk.exists() && apk.length() > 0) showUpdateReadyDialog(apk, tag);
+                    else { toast("Unduhan update gagal, coba lagi nanti"); logError("update-dl", "file hilang"); }
                 }
             } catch (Throwable t) { logError("receiver", String.valueOf(t)); }
         }
