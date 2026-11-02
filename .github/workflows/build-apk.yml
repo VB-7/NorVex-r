@@ -1,0 +1,91 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+# Perlu tulis: menerbitkan Release berisi APK (untuk update dalam aplikasi).
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Android SDK (manual, tanpa setup-android)
+        run: |
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          cd "$HOME/android-sdk/cmdline-tools"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-11076708_latest.zip
+          mkdir -p latest
+          mv cmdline-tools/* latest/
+          rmdir cmdline-tools
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$HOME/android-sdk/platform-tools:$PATH"
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Gradle 8.7
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle-8.7-bin.zip
+          echo "$PWD/gradle-8.7/bin" >> $GITHUB_PATH
+
+      - name: Kunci tanda tangan (tetap antar build)
+        id: ks
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > norvex.keystore
+            echo "pakai kunci dari secret."
+          else
+            keytool -genkeypair -keystore norvex.keystore -alias norvex \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass norvex123 -keypass norvex123 \
+              -dname "CN=NorVex-R"
+            base64 -w0 norvex.keystore > kunci-tanda-tangan.txt
+            echo "fresh=true" >> $GITHUB_OUTPUT
+            echo "KUNCI BARU dibuat — simpan ke secret, lalu jalankan ulang."
+          fi
+
+      - name: Simpan kunci baru (sekali saja)
+        if: steps.ks.outputs.fresh == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kunci-tanda-tangan
+          path: kunci-tanda-tangan.txt
+
+      - name: Rakit APK rilis
+        env:
+          VC: ${{ github.run_number }}
+          KS_PASS: ${{ secrets.KS_PASS }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: Simpan APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NorVex-R-apk
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Terbitkan Release (untuk update dalam aplikasi)
+        if: steps.ks.outputs.fresh != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "b${{ github.run_number }}" \
+            --title "NorVex-R b${{ github.run_number }}" \
+            --notes "Build otomatis. Aplikasi mengecek ini sendiri untuk update." \
+            app/build/outputs/apk/release/*.apk
