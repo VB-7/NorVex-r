@@ -96,8 +96,7 @@ public class MainActivity extends Activity {
     private long lastErrorDialogAt = 0;
     private long updateDownloadId = -1;
     // Splash: WebView disembunyikan sampai web kirim {app_ready:true}.
-    private View splashView = null;
-    private android.widget.TextView splashStatus = null;
+    private FrameLayout webRoot = null; // wadah WebView (buat ulang saat renderer mati)
     private boolean readyShown = false;
     private boolean pageDone = false;
     private static final String UPD_PREF_TAG = "upd_tag"; // tag APK update yg sudah terunduh
@@ -152,7 +151,7 @@ public class MainActivity extends Activity {
                 // file_chunk bisa ratusan pesan per file: jangan banjiri trace.
                 if (!o.has("file_chunk")) trace("pesan: " + kb.toString());
             } catch (Exception ignored) {}
-            if (o.has("app_ready")) { onAppReady(); return; } // splash -> tampil
+            if (o.has("app_ready")) { onAppReady(); return; } // web sudah tampil
             if (o.has("file_start")) { onFileStart(o.optJSONObject("file_start")); return; }
             if (o.has("file_chunk")) { onFileChunk(o.optJSONObject("file_chunk")); return; }
             if (o.has("file_end")) { onFileEnd(o.optJSONObject("file_end")); return; }
@@ -552,121 +551,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ---------------- Splash (tutup saat web siap) ----------------
+    // ---------------- Siap (tanpa tirai: web langsung kelihatan) ----------------
 
-    private final Runnable showWebDelayed = new Runnable() {
-        @Override public void run() { onAppReady(); }
-    };
-    private final Runnable absoluteFallback = new Runnable() {
-        @Override public void run() { onAppReady(); } // mentok 60 dtk: tampil apa adanya
-    };
-
-    private View buildSplash() {
-        try {
-            FrameLayout s = new FrameLayout(this);
-            s.setBackgroundColor(0xFF000000);
-            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
-            box.setOrientation(android.widget.LinearLayout.VERTICAL);
-            box.setGravity(android.view.Gravity.CENTER);
-            FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            bp.gravity = android.view.Gravity.CENTER;
-            android.widget.TextView t = new android.widget.TextView(this);
-            t.setText("NorVex-R");
-            try { t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 34); } catch (Exception ignored) {}
-            t.setTextColor(0xFF00E5FF);
-            try { t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); } catch (Exception ignored) {}
-            t.setGravity(android.view.Gravity.CENTER);
-            t.setSingleLine(true);
-            t.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            // Logo aplikasi di atas nama (pakai ikon launcher sendiri).
-            try {
-                android.widget.ImageView logo = new android.widget.ImageView(this);
-                try { logo.setImageResource(R.drawable.ic_launcher); } catch (Exception ignored) {}
-                int px = (int) (96 * getResources().getDisplayMetrics().density);
-                android.widget.LinearLayout.LayoutParams llp = new android.widget.LinearLayout.LayoutParams(px, px);
-                llp.gravity = android.view.Gravity.CENTER;
-                int mb = (int) (12 * getResources().getDisplayMetrics().density);
-                llp.setMargins(0, 0, 0, mb);
-                logo.setLayoutParams(llp);
-                try {
-                    android.view.animation.AlphaAnimation fade =
-                            new android.view.animation.AlphaAnimation(0f, 1f);
-                    fade.setDuration(600);
-                    fade.setFillAfter(true);
-                    logo.startAnimation(fade);
-                } catch (Exception ignored) {}
-                box.addView(logo, 0);
-            } catch (Exception ignored) {}
-            // Versi aplikasi di bawah nama (biar jelas build ke berapa).
-            try {
-                String vn = "";
-                try { vn = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) {}
-                android.widget.TextView v = new android.widget.TextView(this);
-                v.setText("v" + (vn == null || vn.isEmpty() ? "?" : vn));
-                try { v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14); } catch (Exception ignored) {}
-                v.setTextColor(0xFF9AA7B4);
-                v.setGravity(android.view.Gravity.CENTER);
-                v.setSingleLine(true);
-                v.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-                box.addView(v);
-            } catch (Exception ignored) {}
-            android.widget.ProgressBar p = new android.widget.ProgressBar(this);
-            try {
-                if (p.getIndeterminateDrawable() != null)
-                    p.getIndeterminateDrawable().setColorFilter(0xFF00E5FF, android.graphics.PorterDuff.Mode.SRC_IN);
-            } catch (Exception ignored) {}
-            android.widget.LinearLayout.LayoutParams pp = new android.widget.LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            pp.gravity = android.view.Gravity.CENTER;
-            int m = (int) (18 * getResources().getDisplayMetrics().density);
-            pp.setMargins(0, m, 0, 0);
-            box.addView(t);
-            box.addView(p, pp);
-            android.widget.TextView s2 = new android.widget.TextView(this);
-            s2.setText("Menyiapkan ruang roleplay…");
-            try { s2.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14); } catch (Exception ignored) {}
-            s2.setTextColor(0xFF9AA7B4);
-            s2.setGravity(android.view.Gravity.CENTER);
-            s2.setSingleLine(false);
-            s2.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            box.addView(s2);
-            splashStatus = s2;
-            s.addView(box, bp);
-            return s;
-        } catch (Throwable th) { return null; }
-    }
-
+    // Sinyal dari web bahwa halaman sudah tampil. Tak ada yang ditutup -
+    // cuma catat supaya dialog galat tak menuduh lagi.
     private void onAppReady() {
         try {
-            main.post(new Runnable() {
-                @Override public void run() {
-                    if (readyShown) return;
-                    readyShown = true;
-                    try { main.removeCallbacks(showWebDelayed); } catch (Exception ignored) {}
-                    try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
-                    try { if (web != null) web.setAlpha(1f); } catch (Exception ignored) {}
-                    // Jeda 150ms SEBELUM tirai dibuka: biar frame pertama selesai
-                    // digambar GPU (anti kedip hitam). Splash tetap menutup penuh.
-                    try {
-                        main.postDelayed(new Runnable() {
-                            @Override public void run() {
-                                try {
-                                    if (splashView != null && splashView.getParent() != null) {
-                                        ((ViewGroup) splashView.getParent()).removeView(splashView);
-                                    }
-                                    splashView = null;
-                                    splashStatus = null;
-                                } catch (Exception ignored) {}
-                            }
-                        }, 150);
-                    } catch (Exception ignored) {}
-                    trace("web siap, splash tutup");
-                }
-            });
+            if (readyShown) return;
+            readyShown = true;
+            trace("web siap");
         } catch (Throwable t) { logError("ready", String.valueOf(t)); }
     }
 
@@ -1052,86 +945,68 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // Halaman GAGAL dimuat (sinyal hilang, kuota habis): jangan mentok hitam.
-    // Splash berubah jadi pesan + ketuk = muat ulang. Jalan hanya bila splash
-    // masih ada (web belum tampil); kalau web sudah tampil, cuma dialog.
+    // Halaman GAGAL dimuat (sinyal hilang, kuota habis): tanpa splash penutup,
+    // langsung dialog jujur + tombol coba lagi.
     private void onWebLoadError() {
         try {
             main.post(new Runnable() {
                 @Override public void run() {
                     try {
-                        main.removeCallbacks(showWebDelayed);
-                        main.removeCallbacks(absoluteFallback);
-                    } catch (Exception ignored) {}
-                    try {
-                        if (!readyShown && splashStatus != null) {
-                            splashStatus.setText("Gagal memuat. Periksa koneksi, lalu ketuk layar untuk coba lagi.");
-                        }
-                        if (!readyShown && splashView != null) {
-                            try {
-                                splashView.setOnClickListener(new View.OnClickListener() {
-                                    @Override public void onClick(View v) { retryLoad(); }
-                                });
-                                splashView.setClickable(true);
-                            } catch (Exception ignored) {}
-                        }
+                        if (pageDone || readyShown) return;
+                        showRetryDialog("Gagal membuka halaman. Periksa koneksi lalu coba lagi.");
                     } catch (Exception ignored) {}
                 }
             });
         } catch (Exception ignored) {}
     }
 
+    // Dialog galat + tombol Coba lagi (pengganti splash-ketuk-dulu).
+    private void showRetryDialog(String msg) {
+        try {
+            AlertDialog d = new AlertDialog.Builder(this)
+                    .setTitle("Gagal memuat")
+                    .setMessage(msg)
+                    .setPositiveButton("Coba lagi", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface di, int w) { try { retryLoad(); } catch (Exception ignored) {} }
+                    })
+                    .setNegativeButton("Tutup", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface di, int w) { try { di.dismiss(); } catch (Exception ignored) {} }
+                    })
+                    .setCancelable(true)
+                    .create();
+            pushDialog(d);
+            d.show();
+        } catch (Throwable t) { try { toast("Gagal: " + shortMsg(msg)); } catch (Exception ignored) {} }
+    }
+
     private void retryLoad() {
         try {
             pageDone = false;
             readyShown = false;
-            if (splashStatus != null) {
-                try { splashStatus.setText("Memuat… 0%"); } catch (Exception ignored) {}
-            }
-            if (splashView != null) {
-                try { splashView.setOnClickListener(null); } catch (Exception ignored) {}
-            }
             if (web != null) {
-                try { web.setAlpha(0f); } catch (Exception ignored) {}
                 try { web.reload(); } catch (Exception ignored) {}
             }
-            try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
-            main.postDelayed(absoluteFallback, 60000);
             trace("muat ulang");
         } catch (Throwable t) { logError("retry", String.valueOf(t)); }
     }
 
-    // Bangkit dari renderer mati: tampilkan splash lagi (ada % + tombol coba),
-    // sembunyikan web mati, muat ulang. Dipakai juga saat pulih dari jeda.
+    // Bangkit dari renderer mati: WebView yang mati TAK BISA dipakai lagi
+    // (aturan resmi Android) -> cabut + hancurkan + buat BARU yang segar,
+    // langsung buka halaman (tanpa tirai). Dipakai juga saat pulih dari jeda.
     private void recoverRenderer(boolean crash) {
         try {
             pageDone = false;
             readyShown = false;
-            try { main.removeCallbacks(showWebDelayed); } catch (Exception ignored) {}
-            try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
             try {
-                if (splashView == null) splashView = buildSplash();
-                if (splashView != null) {
-                    try { splashView.setOnClickListener(null); } catch (Exception ignored) {}
-                    try {
-                        if (splashView.getParent() == null && web != null && web.getParent() != null) {
-                            ((ViewGroup) web.getParent()).addView(splashView, new FrameLayout.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-                        }
-                    } catch (Exception ignored) {}
-                    try { splashView.setVisibility(View.VISIBLE); } catch (Exception ignored) {}
+                if (web != null) {
+                    try { ((ViewGroup) web.getParent()).removeView(web); } catch (Exception ignored) {}
+                    try { web.destroy(); } catch (Exception ignored) {}
+                    web = null;
                 }
             } catch (Exception ignored) {}
-            if (splashStatus != null) {
-                try { splashStatus.setText(crash ? "Kehabisan memori, memuat ulang…" : "Memuat ulang… 0%"); } catch (Exception ignored) {}
-            }
-            if (web != null) {
-                try { web.setAlpha(0f); } catch (Exception ignored) {}
-                try { web.reload(); } catch (Exception ignored) {}
-            }
-            main.postDelayed(absoluteFallback, 60000);
+            setupFreshWebView();
             if (crash) { try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {} }
-            trace("pulih renderer");
+            trace("pulih renderer (WebView baru)");
         } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
 
@@ -1219,47 +1094,14 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // ---------------- Activity ----------------
-
-    @Override
-    protected void onCreate(Bundle b) {
-        super.onCreate(b);
-        hookCrashLogger(); // catat biang force-close ke folder error/
-        pruneOldLogs(); // buang trace/log/crash >14 hari (hemat storage mepet)
-        trace("boot mulai");
-        hideNav();
-        FrameLayout root = new FrameLayout(this);
-        root.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        root.setBackgroundColor(0xFF000000); // hitam: selaras takik + tema gelap
-        setContentView(root);
-        // Keyboard: biar kolom ketik tak ketimpa (lihat fixKeyboardOverlap).
-        try { getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Exception ignored) {}
-        fixKeyboardOverlap(root);
-        ensureStoragePerm(); // minta izin tulis SEKALI (HP Android 9/10)
-
-        web = new WebView(this);
-        // WebView TETAP visible (jangan INVISIBLE/GONE!): GPU Android melewatkan
-        // render komponen yang disembunyikan, sehingga pas dibuka butuh redraw
-        // = kedip hitam. Trik: tetap VISIBLE tapi alpha 0 (transparan) — GPU
-        // terus menggambar di background, pas dijernihkan langsung ada isinya.
-        web.setAlpha(0f);
-        root.addView(web, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        // Splash duluan (logo + animasi milik sendiri): user tak melihat
-        // proses loading web sama sekali — tak ada spinner/blank Perchance.
+    // Bikin WebView segar + langsung buka halaman. Dipakai saat aplikasi dibuka
+    // dan saat bangkit dari renderer mati. Tanpa splash/tirai: user melihat
+    // proses muat web apa adanya (lebih ringan + jujur).
+    private void setupFreshWebView() {
         try {
-            splashView = buildSplash();
-            if (splashView != null) root.addView(splashView, new FrameLayout.LayoutParams(
+            web = new WebView(this);
+            if (webRoot != null) webRoot.addView(web, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        } catch (Exception ignored) {}
-        // Pengaman mentok: kalau sinyal siap tak kunjung datang (mis. web
-        // belum di-Save sehingga belum kirim app_ready), tampilkan web apa
-        // adanya — tapi JANGAN buta 20 dtk: tunggu halaman selesai dulu
-        // (progres % tampil di splash), mentok absolut 60 dtk.
-        main.postDelayed(absoluteFallback, 60000);
-
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -1300,12 +1142,8 @@ public class MainActivity extends Activity {
                 injectCosmetic();
                 // Halaman selesai -> tuduhan galat tadi batal (flaky sesaat).
                 try { main.removeCallbacks(errorDlgDelayed); } catch (Exception ignored) {}
-                // Halaman selesai + beri jeda lukis 3 dtk -> tampil (kalau
-                // sinyal app_ready belum datang). Splash tetap tutup cepat
-                // via app_ready bila web sudah di-Save.
+            // Halaman selesai -> salam native + kosmetik + batalkan tuduhan galat.
                 try {
-                    main.removeCallbacks(showWebDelayed);
-                    if (!readyShown) main.postDelayed(showWebDelayed, 3000);
                 } catch (Exception ignored) {}
             }
 
@@ -1360,41 +1198,6 @@ public class MainActivity extends Activity {
                 return true; // kita yang tangani: jangan biarkan hitam
             }
 
-            // AdBlock level jaringan ala Sunny Gupta: cegat request iklan SEBELUM
-            // diunduh. Halaman utama tak pernah diblokir; gagal cocok -> teruskan.
-            @Override
-            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
-                try {
-                    if (BLOCK_ADS && req != null && req.getUrl() != null) {
-                        if (Build.VERSION.SDK_INT >= 21 && req.isForMainFrame()) return super.shouldInterceptRequest(view, req);
-                        String url = req.getUrl().toString();
-                        if (url != null && (url.startsWith("http://") || url.startsWith("https://"))
-                                && isAdHost(req.getUrl().getHost())) {
-                            adTrace(req.getUrl().getHost());
-                            WebResourceResponse empty = emptyBlockedResponse(url);
-                            if (empty != null) return empty;
-                        }
-                    }
-                } catch (Throwable t) { logError("adblock", String.valueOf(t)); }
-                try { return super.shouldInterceptRequest(view, req); } catch (Throwable t) { return null; }
-            }
-
-            @SuppressWarnings("deprecation")
-            @Override
-            public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
-                try {
-                    if (BLOCK_ADS && url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
-                        String host = null;
-                        try { host = android.net.Uri.parse(url).getHost(); } catch (Exception ignored) {}
-                        if (isAdHost(host)) {
-                            adTrace(host);
-                            WebResourceResponse empty = emptyBlockedResponse(url);
-                            if (empty != null) return empty;
-                        }
-                    }
-                } catch (Throwable t) { logError("adblock", String.valueOf(t)); }
-                try { return super.shouldInterceptRequest(view, url); } catch (Throwable t) { return null; }
-            }
         });
 
         web.setWebChromeClient(new WebChromeClient() {
@@ -1424,17 +1227,6 @@ public class MainActivity extends Activity {
                 return true;
             }
 
-            // Progres loading -> tampil di splash ("Memuat… 37%"): di jaringan
-            // lambat user TAHU aplikasi bekerja, bukan macet.
-            @Override
-            public void onProgressChanged(WebView view, int newProgress) {
-                try {
-                    if (!readyShown && splashStatus != null) {
-                        splashStatus.setText("Memuat… " + newProgress + "%");
-                    }
-                } catch (Exception ignored) {}
-                try { super.onProgressChanged(view, newProgress); } catch (Exception ignored) {}
-            }
         });
 
         // Jaring pengaman: unduhan http yang lolos dari intersepsi web.
@@ -1451,6 +1243,32 @@ public class MainActivity extends Activity {
                 startDownloadHttp(url, name, mime == null ? "" : mime);
             }
         });
+            web.loadUrl(START_URL);
+            trace("web dibuka");
+        } catch (Throwable t) { logError("setupweb", String.valueOf(t)); }
+    }
+
+    // ---------------- Activity ----------------
+
+    @Override
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        hookCrashLogger(); // catat biang force-close ke folder error/
+        pruneOldLogs(); // buang trace/log/crash >14 hari (hemat storage mepet)
+        trace("boot mulai");
+        hideNav();
+        FrameLayout root = new FrameLayout(this);
+        root.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.setBackgroundColor(0xFF000000); // hitam: selaras takik + tema gelap
+        setContentView(root);
+        // Keyboard: biar kolom ketik tak ketimpa (lihat fixKeyboardOverlap).
+        try { getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Exception ignored) {}
+        fixKeyboardOverlap(root);
+        ensureStoragePerm(); // minta izin tulis SEKALI (HP Android 9/10)
+
+        webRoot = root;
+        setupFreshWebView(); // buat WebView + langsung buka halaman (tanpa tirai)
 
         try {
             IntentFilter dlFilter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
@@ -1466,13 +1284,6 @@ public class MainActivity extends Activity {
             File base = baseDirExternal();
             if (base != null) ensureNoMedia(new File(base, "download"));
         } catch (Exception ignored) {}
-
-        if (b == null) {
-            web.loadUrl(START_URL);
-            trace("web dibuka");
-        } else {
-            try { web.restoreState(b); } catch (Exception e) { web.loadUrl(START_URL); }
-        }
 
         checkUpdate();
     }
@@ -1605,94 +1416,6 @@ public class MainActivity extends Activity {
             if (greetLeft > 0) main.postDelayed(this, GREET_EVERY_MS);
         }
     };
-
-    // ---------------- AdBlock level jaringan (gaya Sunny Gupta) ----------------
-    // Request iklan dicegat SEBELUM diunduh (hemat kuota/RAM, halaman lebih cepat).
-    // Aturan = daftar host iklan (satu domain per baris). Subdomain ikut diblokir
-    // otomatis (mis. "doubleclick.net" menutup "googleads.g.doubleclick.net").
-    // Cara pasang rules sendiri: tambah baris domain di AD_HOSTS ini.
-    private static final boolean BLOCK_ADS = true; // saklar utama (false = mati total)
-    // Tambahan Nov 2026 (temuan log HP: host ini gagal koneksi BERULANG =
-    // makan RAM + lambat + banjiri log; ketiganya pelacak/iklan murni,
-    // bukan fungsi halaman): analytics + gtag + doubleclick-root +
-    // cloudflare-beacon + vlitag + facebook-pixel.
-    private static final Set<String> AD_HOSTS = new HashSet<String>(Arrays.asList(
-            "googleads.g.doubleclick.net",
-            "pagead2.googlesyndication.com",
-            "tpc.googlesyndication.com",
-            "googlesyndication.com",
-            "doubleclick.net",
-            "googleadservices.com",
-            "adservice.google.com",
-            "google-analytics.com",
-            "analytics.google.com",
-            "stats.g.doubleclick.net",
-            "googletagmanager.com",
-            "cloudflareinsights.com",
-            "vlitag.com",
-            "facebook.net",
-            "imasdk.googleapis.com",
-            "amazon-adsystem.com",
-            "criteo.com",
-            "criteo.net",
-            "pubmatic.com",
-            "rubiconproject.com",
-            "openx.net",
-            "openx.com",
-            "adnxs.com",
-            "adsrvr.org",
-            "moatads.com",
-            "doubleverify.com",
-            "outbrain.com",
-            "taboola.com",
-            "revcontent.com",
-            "mgid.com",
-            "connect.facebook.net",
-            "adcolony.com",
-            "applovin.com",
-            "unityads.unity3d.com"
-    ));
-
-    private static boolean isAdHost(String host) {
-        try {
-            if (!BLOCK_ADS || host == null) return false;
-            String h = host.trim().toLowerCase();
-            if (h.isEmpty()) return false;
-            for (String rule : AD_HOSTS) {
-                if (h.equals(rule) || h.endsWith("." + rule)) return true;
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    // Trace iklan dibatasi (20/baris sesi): halaman penuh iklan bisa
-    // menembak ratusan request — file trace harian jangan membengkak.
-    private static int adTraceCount = 0;
-
-    private void adTrace(String host) {
-        try {
-            if (adTraceCount < 20) {
-                adTraceCount++;
-                trace("iklan diblokir: " + host + (adTraceCount == 20 ? " (+disenyapkan)" : ""));
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // Balasan kosong yang valid (200 OK): WebView anggap request selesai normal,
-    // bukan koneksi putus — ini pencegah crash ala Sunny Gupta.
-    private static WebResourceResponse emptyBlockedResponse(String url) {
-        try {
-            String mime = "text/plain";
-            if (url != null) {
-                String u = url.toLowerCase();
-                if (u.contains(".js")) mime = "application/javascript";
-                else if (u.contains(".css")) mime = "text/css";
-                else if (u.contains(".png") || u.contains(".jpg") || u.contains(".gif") || u.contains(".webp")) mime = "image/png";
-            }
-            return new WebResourceResponse(mime, "UTF-8", new ByteArrayInputStream(new byte[0]));
-        } catch (Exception ignored) {}
-        return null;
-    }
 
     // ---------------- Cosmetic (rules elemen ala uBlock: domain###id) ----------------
     // Elemen milik halaman sendiri (bukan request iklan) tak bisa diblokir di
@@ -1901,8 +1624,6 @@ public class MainActivity extends Activity {
         try { unregisterReceiver(dlReceiver); } catch (Exception ignored) {}
         try {
             main.removeCallbacks(greetRun);
-            main.removeCallbacks(showWebDelayed);
-            main.removeCallbacks(absoluteFallback);
             main.removeCallbacks(errorDlgDelayed);
             if (web != null) {
                 ((ViewGroup) web.getParent()).removeView(web);
