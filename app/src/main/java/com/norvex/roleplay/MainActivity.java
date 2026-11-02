@@ -1260,9 +1260,9 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.setBackgroundColor(0xFF000000); // hitam: selaras takik + tema gelap
         setContentView(root);
-        // Keyboard: biar kolom ketik tak ketimpa (lihat fixKeyboardOverlap).
+        // Keyboard: cukup adjustResize sistem (cara aplikasi MIT: tanpa ganjal
+        // manual — ganjal manual + resize sistem = jarak hitam ganda).
         try { getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Exception ignored) {}
-        fixKeyboardOverlap(root);
         ensureStoragePerm(); // minta izin tulis SEKALI (HP Android 9/10)
 
         webRoot = root;
@@ -1354,8 +1354,8 @@ public class MainActivity extends Activity {
     // Fullscreen imersif TANPA flag LAYOUT_*: LAYOUT_FULLSCREEN/LAYOUT_HIDE_NAV
     // membuat window tak ikut mengecil saat keyboard muncul (adjustResize mati
     // total di sebagian HP) — itu biang textbox ketutup. Tanpa LAYOUT_*,
-    // bar tetap sembunyi (FULLSCREEN+HIDE_NAV+IMMERSIVE_STICKY) tapi window
-    // resize normal + ganjal manual di fixKeyboardOverlap jalan.
+    // bar tetap sembunyi (FULLSCREEN+HIDE_NAV+IMMERSIVE_STICKY) + window
+    // resize normal (cara aplikasi MIT, tanpa ganjal manual).
     // Niat: TAK ADA alis abu — bar sistem hitam total & sembunyi; kalau bocor
     // (terlihat strip abu), sembunyikan lagi 2 dtk kemudian.
     private void hideNav() {
@@ -1418,17 +1418,24 @@ public class MainActivity extends Activity {
     // ---------------- Cosmetic (rules elemen ala uBlock: domain###id) ----------------
     // Elemen milik halaman sendiri (bukan request iklan) tak bisa diblokir di
     // level jaringan — caranya disembunyikan via CSS, persis seperti
-    // injectCosmeticHelper-nya Sunny Gupta. b48 (copas AIA 1:1, user minta):
-    // HANYA 6 rules user, TANPA background, TANPA ubah title. Buktinya:
-    // b46 (tanpa suntik) tampil, b45+b47 (suntik+tambahan) hitam — jadi semua
-    // tambahan (7 ID chrome, background hitam, title) DIBUANG, tinggal yang
-    // terbukti aman di aplikasi MIT user.
+    // injectCosmeticHelper-nya Sunny Gupta. b49 (copas AIA 1:1 + sisa abu):
+    // HANYA 6 rules user + #menuBarEl (saudara aman di luar output; Perchance
+    // sendiri sembunyikan dia di minimal mode) + body gelap (biar sisa kulit
+    // luar yang bocor tidak abu-abu). Buktinya:
+    // b46 (tanpa suntik) tampil, b45+b47 (suntik+tambahan) hitam.
+    // TEMUAN PENTING dari bedah HTML halaman publik: #editorEl adalah INDUK
+    // dari #main/#b/#output/#outputIframeEl — menyembunyikan editorEl =
+    // menyembunyikan SELURUH generator = BLACK SCREEN (itu biang b45/b47!).
+    // editorEl/main/b/e/output JANGAN PERNAH disembunyikan.
+    // header/footer/nav tak bersalah (b47 tanpa mereka tetap hitam).
     private static final String COSMETIC_CSS =
             "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
-            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El{display:none!important}";
+            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El," +
+            "#menuBarEl{display:none!important}" +
+            "body{background:#0b0e14!important}";
 
     private void injectCosmetic() {
-        // b48: suntik HANYA 6 rules user — sama persis dgn aplikasi MIT.
+        // b49: 6 rules + menuBarEl + body gelap (abu hilang, editorEl JANGAN disentuh).
         try {
             // documentElement bisa null bila disuntik di onPageStarted
             // (terlalu awal) -> lewati saja, onPageFinished menyuntik lagi.
@@ -1452,68 +1459,10 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // Keyboard menutupi kolom ketik + takik kamera menutupi header: ganjal
-    // manual sebagai lapis kedua di atas adjustResize sistem. Sengaja diganjal
-    // WADAH (root), bukan WebView-nya: viewport web ikut menyusut sehingga
-    // #main (position:fixed; inset:0) + kolom ketik naik ke atas keyboard,
-    // dan header turun ke bawah takik. Ganjal WebView-nya langsung
-    // (web.setPadding) tak menggeser elemen fixed — itu biang "textbox gak
-    // naik" di build lama.
-    private int statusBarPx = -1; // cache tinggi status bar (tetap per HP)
-
-    // Tinggi takik: safe inset kamera, atau tinggi status bar bila tak ada.
-    private int getTopInset() {
-        int cut = 0;
-        try {
-            if (Build.VERSION.SDK_INT >= 28) {
-                android.view.WindowInsets wi = getWindow().getDecorView().getRootWindowInsets();
-                if (wi != null && wi.getDisplayCutout() != null) cut = wi.getDisplayCutout().getSafeInsetTop();
-            }
-        } catch (Exception ignored) {}
-        if (statusBarPx < 0) {
-            int sb = 0;
-            try {
-                int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
-                if (id > 0) sb = getResources().getDimensionPixelSize(id);
-            } catch (Exception ignored) {}
-            statusBarPx = sb;
-        }
-        return Math.max(cut, statusBarPx);
-    }
-
-    private void fixKeyboardOverlap(final View root) {
-        try {
-            root.getViewTreeObserver().addOnGlobalLayoutListener(
-                    new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
-                        private int lastPad = -1;
-                        private int lastTop = -1;
-                        @Override public void onGlobalLayout() {
-                            try {
-                                if (web == null) return;
-                                android.graphics.Rect r = new android.graphics.Rect();
-                                root.getWindowVisibleDisplayFrame(r);
-                                int full = root.getRootView().getHeight();
-                                int kb = full - r.bottom;
-                                if (kb < 0) kb = 0;
-                                int minKb = (int) (100 * getResources().getDisplayMetrics().density);
-                                int pad = (kb > minKb) ? kb : 0;
-                                int top = getTopInset();
-                                if (pad != lastPad || top != lastTop) {
-                                    lastPad = pad;
-                                    lastTop = top;
-                                    try { web.setPadding(0, 0, 0, 0); } catch (Exception ignored) {}
-                                    root.setPadding(0, top, 0, pad);
-                                    try { root.requestLayout(); } catch (Exception ignored) {}
-                                    if (pad > 0) {
-                                        try { web.evaluateJavascript("try{var el=document.activeElement;if(el&&el.scrollIntoView)el.scrollIntoView({block:'nearest'});}catch(e){}", null); } catch (Exception ignored) {}
-                                    }
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                    });
-        } catch (Exception ignored) {}
-    }
-
+    // b49: ganjal manual DIHAPUS total (copas cara aplikasi MIT: andalkan
+    // adjustResize sistem saja). Ganjal + resize = kolom ketik mental jauh +
+    // strip hitam (padding root dengan background hitam). Takik aman tanpa
+    // ganjal: isi generator (iframe) mulai di bawah kulit luar Perchance.
     private void toast(final String msg) {
         try { Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); } catch (Exception ignored) {}
     }
