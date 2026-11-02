@@ -130,6 +130,7 @@ public class MainActivity extends Activity {
         File partFile;
         RandomAccessFile raf;
         long received;
+        int lastPct;
     }
 
     // ---------------- Pesan MASUK dari web ----------------
@@ -143,7 +144,8 @@ public class MainActivity extends Activity {
                 java.util.Iterator<String> ks = o.keys();
                 StringBuilder kb = new StringBuilder();
                 while (ks.hasNext()) { if (kb.length() > 0) kb.append(","); kb.append(ks.next()); }
-                trace("pesan: " + kb.toString());
+                // file_chunk bisa ratusan pesan per file: jangan banjiri trace.
+                if (!o.has("file_chunk")) trace("pesan: " + kb.toString());
             } catch (Exception ignored) {}
             if (o.has("file_start")) { onFileStart(o.optJSONObject("file_start")); return; }
             if (o.has("file_chunk")) { onFileChunk(o.optJSONObject("file_chunk")); return; }
@@ -172,6 +174,16 @@ public class MainActivity extends Activity {
             if (f == null) return;
             String id = f.optString("id", "");
             if (id.isEmpty()) return;
+            // id dobel (kirim ulang / web retry): tutup & buang sisa lama dulu
+            // agar file-descriptor tak bocor dan isi tak tercampur.
+            try {
+                PartState old = parts.remove(id);
+                if (old != null) {
+                    try { if (old.raf != null) old.raf.close(); } catch (Exception ignored) {}
+                    try { if (old.partFile != null) old.partFile.delete(); } catch (Exception ignored) {}
+                    taskEnd("dl-" + id);
+                }
+            } catch (Exception ignored) {}
             PartState st = new PartState();
             st.id = id;
             st.target = sanitizeTarget(f.optString("target", "download"));
@@ -208,6 +220,16 @@ public class MainActivity extends Activity {
                 st.raf.write(raw);
                 st.received += raw.length;
             } catch (Exception e) { logError("file_chunk", e.toString()); }
+            // Progres penerimaan (di-throttle per 2%) -> notifikasi ada %.
+            try {
+                if (st.size > 0) {
+                    int pct = (int) (st.received * 100 / st.size);
+                    if (pct != st.lastPct && (pct - st.lastPct >= 2 || pct >= 100)) {
+                        st.lastPct = pct;
+                        taskProgress("dl-" + st.id, st.received, st.size, "Menerima " + st.name);
+                    }
+                }
+            } catch (Exception ignored) {}
         } catch (Throwable t) { logError("file_chunk", String.valueOf(t)); }
     }
 
@@ -215,25 +237,37 @@ public class MainActivity extends Activity {
         try {
             if (f == null) return;
             String id = f.optString("id", "");
-            PartState st = parts.remove(id);
+            final PartState st = parts.remove(id);
             taskEnd("dl-" + id);
             if (st == null) return;
             try { if (st.raf != null) st.raf.close(); } catch (Exception ignored) {}
-            File dest = resolveTarget(st.target, st.name);
+            final File dest = resolveTarget(st.target, st.name);
             if (dest == null || st.partFile == null || !st.partFile.exists()) {
                 toast("Gagal menyimpan " + st.name);
                 logError("file_end", "tujuan tak bisa dipakai: " + st.target + "/" + st.name);
                 return;
             }
-            try {
-                copyFile(st.partFile, dest);
-                try { st.partFile.delete(); } catch (Exception ignored) {}
-                String loc = locationLabel(dest);
-                toast("Tersimpan: " + loc + "/" + dest.getName());
-                trace("file tersimpan: " + dest.getName());            } catch (Exception e) {
-                toast("Gagal menyimpan " + st.name);
-                logError("file_end", e.toString());
-            }
+            // Salin di latar (file bisa puluhan MB): JANGAN di thread UI (ANR).
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        copyFile(st.partFile, dest);
+                        try { st.partFile.delete(); } catch (Exception ignored) {}
+                        final String nm = dest.getName();
+                        main.post(new Runnable() {
+                            @Override public void run() {
+                                toast("Tersimpan: " + nm);
+                                trace("file tersimpan: " + nm);
+                            }
+                        });
+                    } catch (final Exception e) {
+                        main.post(new Runnable() {
+                            @Override public void run() { toast("Gagal menyimpan " + st.name); }
+                        });
+                        logError("file_end", e.toString());
+                    }
+                }
+            }).start();
         } catch (Throwable t) { logError("file_end", String.valueOf(t)); }
     }
 
@@ -293,17 +327,6 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    private String locationLabel(File dest) {
-        try {
-            String p = dest.getParent();
-            File ext = baseDirExternal();
-            if (ext != null && p != null && p.startsWith(ext.getAbsolutePath())) {
-                return p.substring(ext.getParent().length() + 1); // "perchance_app/Roleplay/..."
-            }
-        } catch (Exception ignored) {}
-        return "folder aplikasi";
-    }
-
     // .nomedia: sembunyikan dari galeri/pemutar media (privasi!). Rekursif ke subfolder.
     private void ensureNoMedia(File downloadDir) {
         try {
@@ -329,30 +352,105 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ---------------- Unduhan http langsung (DownloadManager, tanpa izin apa pun) ----------------
+    // Unduhan http langsung (DownloadManager, tanpa izin apa pun).
+    // Berupa ANTREAN serial di latar belakang: user tak perlu tahu/tunggu —
+    // dikerjakan satu per satu, tiap selesai ada notif + toast pendek.
+    private static class HttpJob { String url, name, mime; }
+    private final java.util.ArrayDeque<HttpJob> httpQueue = new java.util.ArrayDeque<HttpJob>();
+    private long activeHttpDmId = -1;
+    private String activeHttpName = "";
+    private int httpFails = 0; // pengaman: gagal beruntun -> berhenti, jangan macet antrean
+    private final java.util.Map<Long, String> dmJobs = new java.util.HashMap<Long, String>();
+    private boolean dmPolling = false;
 
     private void startDownloadHttp(String url, String filename, String mime) {
         if (url == null || !url.startsWith("http")) return;
         final String safe = sanitizeName(filename == null || filename.isEmpty() ? "download" : filename);
-        taskStart("dl-http", "Mengunduh " + safe);
+        HttpJob j = new HttpJob();
+        j.url = url; j.name = safe; j.mime = (mime == null ? "" : mime);
+        httpQueue.add(j);
+        trace("antre unduhan: " + safe);
+        pumpHttpQueue();
+    }
+
+    private void pumpHttpQueue() {
         try {
+            if (activeHttpDmId != -1) return; // masih ada yang jalan
+            final HttpJob j = httpQueue.poll();
+            if (j == null) return;
             DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-            if (dm == null) { toast("Unduhan gagal: layanan tidak ada"); taskEnd("dl-http"); return; }
-            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
-            r.setTitle(safe);
+            if (dm == null) { httpFail("layanan tidak ada"); return; }
+            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(j.url));
+            r.setTitle(j.name);
             r.setDescription("NorVex-R");
             r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             // WAJIB: /storage/emulated/0/perchance_app/Roleplay/download/
-            r.setDestinationInExternalPublicDir("perchance_app", "Roleplay/download/" + safe);
-            if (mime != null && !mime.isEmpty()) { try { r.setMimeType(mime); } catch (Exception ignored) {} }
-            dm.enqueue(r);
-            toast("Mengunduh " + safe + " ke perchance_app/Roleplay/download");
-            trace("unduh http mulai: " + safe);
-        } catch (Exception e) {
-            toast("Unduhan gagal dimulai");
-            logError("download-http", e.toString());
+            r.setDestinationInExternalPublicDir("perchance_app", "Roleplay/download/" + j.name);
+            if (j.mime != null && !j.mime.isEmpty()) { try { r.setMimeType(j.mime); } catch (Exception ignored) {} }
+            long id = dm.enqueue(r);
+            activeHttpDmId = id;
+            activeHttpName = j.name;
+            synchronized (dmJobs) { dmJobs.put(id, "dl-http"); }
+            taskStart("dl-http", "Mengunduh " + j.name);
+            trace("unduh http mulai: " + j.name);
+            pollDmProgress();
+        } catch (Exception e) { httpFail(e.toString()); }
+    }
+
+    // Satu unduhan http gagal: catat, lanjut ke antrean berikut. Gagal 3x
+    // beruntun (mis. layanan mati total) -> buang sisa antrean + beri tahu
+    // user, JANGAN rekursi tanpa henti (itu stack-overflow = force close).
+    private void httpFail(String why) {
+        try {
+            logError("download-http", why);
             taskEnd("dl-http");
-        }
+            activeHttpDmId = -1;
+            activeHttpName = "";
+            httpFails++;
+            if (httpFails > 3) {
+                httpFails = 0;
+                httpQueue.clear();
+                toast("Unduhan gagal, coba lagi nanti");
+            } else {
+                pumpHttpQueue();
+            }
+        } catch (Throwable t) { logError("download-http", String.valueOf(t)); }
+    }
+
+    // Intip progres DownloadManager tiap detik -> notifikasi ada % + ukuran.
+    private void pollDmProgress() {
+        try {
+            if (dmPolling) return;
+            dmPolling = true;
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                        while (true) {
+                            java.util.Map<Long, String> jobs;
+                            synchronized (dmJobs) { jobs = new java.util.HashMap<Long, String>(dmJobs); }
+                            if (jobs.isEmpty() || dm == null) break;
+                            for (java.util.Map.Entry<Long, String> en : jobs.entrySet()) {
+                                try {
+                                    DownloadManager.Query q = new DownloadManager.Query().setFilterById(en.getKey());
+                                    android.database.Cursor c = null;
+                                    try {
+                                        c = dm.query(q);
+                                        if (c != null && c.moveToFirst()) {
+                                            long done = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+                                            long total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+                                            if (total > 0) taskProgress(en.getValue(), done, total, null);
+                                        }
+                                    } finally { try { if (c != null) c.close(); } catch (Exception ignored) {} }
+                                } catch (Exception ignored) {}
+                            }
+                            try { Thread.sleep(1000); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                    dmPolling = false;
+                }
+            }).start();
+        } catch (Exception ignored) {}
     }
 
     // ---------------- Pratinjau: jendela gambar sendiri (WebView polos) ----------------
@@ -400,6 +498,22 @@ public class MainActivity extends Activity {
             s.setDisplayZoomControls(false);
             s.setLoadWithOverviewMode(true);
             s.setUseWideViewPort(true);
+            // Tombol tutup SELALU ada: usap-bawah sering tak sampai (WebView
+            // makan sentuhan di atas gambar), tombol ini jalan 100%.
+            try {
+                android.widget.ImageButton x = new android.widget.ImageButton(getContext());
+                x.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
+                x.setBackgroundColor(0x00000000);
+                x.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { try { dismiss(); } catch (Exception ignored) {} }
+                });
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
+                int m = (int) (16 * getContext().getResources().getDisplayMetrics().density);
+                lp.setMargins(m, m, m, m);
+                root.addView(x, lp);
+            } catch (Exception ignored) {}
             if (url.startsWith("data:")) {
                 String html = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=5'/>" +
                         "<style>html,body{margin:0;background:#000;height:100%}img{width:100%;height:auto}</style></head>" +
@@ -469,11 +583,35 @@ public class MainActivity extends Activity {
         } catch (Throwable t) { logError("taskEnd", String.valueOf(t)); }
     }
 
+    // Progres tugas (notifikasi ada % + ukuran). Label boleh null = pakai yg ada.
+    // Diam saat aplikasi di latar: service tak boleh dibangunkan dari
+    // background di Android baru (melempar tiap detik = spam log + baterai).
+    private volatile boolean uiVisible = true;
+
+    private void taskProgress(String id, long done, long total, String label) {
+        try {
+            if (!uiVisible) return;
+            Intent i = new Intent(this, TaskService.class);
+            i.setAction(TaskService.ACT_PROGRESS);
+            i.putExtra(TaskService.EXTRA_ID, id == null ? "" : id);
+            i.putExtra(TaskService.EXTRA_DONE, done);
+            i.putExtra(TaskService.EXTRA_TOTAL, total);
+            i.putExtra(TaskService.EXTRA_LABEL, label == null ? "" : label);
+            startSvc(i);
+        } catch (Throwable t) { logError("taskProgress", String.valueOf(t)); }
+    }
+
     private void startSvc(Intent i) {
         try {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
             else startService(i);
-        } catch (Exception e) { logError("service", e.toString()); }
+        } catch (Exception e) {
+            // Android 12+: start dari background DILARANG sistem (bukan bug
+            // kita) -> catat ringan saja, jangan spam file error tiap detik.
+            String m = String.valueOf(e);
+            if (m.contains("Background") || m.contains("NotAllowed") || m.contains("background")) trace("service bg ditolak");
+            else logError("service", m);
+        }
     }
 
     // ---------------- Error: log file + dialog (fallback berlapis) ----------------
@@ -540,7 +678,7 @@ public class MainActivity extends Activity {
             lastErrorDialogAt = now;
             AlertDialog d = new AlertDialog.Builder(this)
                     .setTitle("Terjadi galat")
-                    .setMessage(shortMsg(msg) + "\n\n(catatan tersimpan di folder error)")
+                    .setMessage(shortMsg(msg))
                     .setPositiveButton("Tutup", new DialogInterface.OnClickListener() {
                         @Override public void onClick(DialogInterface di, int w) { try { di.dismiss(); } catch (Exception ignored) {} }
                     })
@@ -561,28 +699,33 @@ public class MainActivity extends Activity {
 
     // ---------------- Cek update dalam aplikasi ----------------
 
+    // Cek update SETIAP buka aplikasi, diam-diam di latar belakang: tanpa
+    // throttle antar-buka manual, tanpa toast/suara. Satu-satunya yang user
+    // lihat adalah dialog "pasang" kalau versi baru benar-benar sudah terunduh.
+    // Pengaman internal: rotasi layar (onCreate ulang) tak memicu cek ganda.
+    private static long lastUpdateCheckAt = 0;
+
     private void checkUpdate() {
         try {
-            SharedPreferences sp = getSharedPreferences("nv", MODE_PRIVATE);
-            long last = sp.getLong("upd_last", 0);
-            if (System.currentTimeMillis() - last < 1L * 3600 * 1000) return;
-            sp.edit().putLong("upd_last", System.currentTimeMillis()).apply();
+            long now = System.currentTimeMillis();
+            if (now - lastUpdateCheckAt < 10 * 60 * 1000) return;
+            lastUpdateCheckAt = now;
             new Thread(new Runnable() {
                 @Override public void run() {
+                    HttpURLConnection c = null;
+                    InputStream in = null;
                     try {
                         URL u = new URL("https://api.github.com/repos/" + UPDATE_REPO + "/releases/latest");
-                        HttpURLConnection c = (HttpURLConnection) u.openConnection();
                         c.setRequestProperty("User-Agent", "NorVex-R");
                         c.setRequestProperty("Accept", "application/vnd.github+json");
                         c.setConnectTimeout(15000);
                         c.setReadTimeout(15000);
                         if (c.getResponseCode() != 200) return;
-                        InputStream in = c.getInputStream();
+                        in = c.getInputStream();
                         ByteArrayOutputStream bos = new ByteArrayOutputStream();
                         byte[] buf = new byte[8192];
                         int r;
                         while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
-                        try { in.close(); } catch (Exception ignored) {}
                         JSONObject rel = new JSONObject(bos.toString("UTF-8"));
                         String tag = rel.optString("tag_name", "");
                         int remote = parseTagCode(tag);
@@ -598,6 +741,11 @@ public class MainActivity extends Activity {
                             @Override public void run() { onUpdateFound(fUrl, fTag); }
                         });
                     } catch (Exception e) { logError("update-check", e.toString()); }
+                    finally {
+                        // Tutup SELALU (bocor koneksi = baterai + soket habis).
+                        try { if (in != null) in.close(); } catch (Exception ignored) {}
+                        try { if (c != null) c.disconnect(); } catch (Exception ignored) {}
+                    }
                 }
             }).start();
         } catch (Throwable t) { logError("update-check", String.valueOf(t)); }
@@ -631,9 +779,14 @@ public class MainActivity extends Activity {
                 showUpdateReadyDialog(apk, tag);
                 return;
             }
-            if (updateDownloadId != -1) { toast("Update " + tag + " masih mengunduh…"); return; }
+            if (updateDownloadId != -1) { trace("update masih mengunduh: " + tag); return; }
+            // Hapus APK lama dulu: kalau unduhan BARU gagal, file basi bertag
+            // lama JANGAN dikira "siap dipasang" oleh penerima selesai.
+            try {
+                File stale = new File(new File(getExternalFilesDir(null), "update"), "norvex-r.apk");
+                if (stale.exists()) stale.delete();
+            } catch (Exception ignored) {}
             sp.edit().putString(UPD_PREF_TAG, tag).apply();
-            toast("Update " + tag + " ditemukan, mengunduh…");
             trace("update mengunduh: " + tag);
             startUpdateDownload(apkUrl);
         } catch (Throwable t) { logError("update-found", String.valueOf(t)); }
@@ -643,7 +796,7 @@ public class MainActivity extends Activity {
         try {
             AlertDialog d = new AlertDialog.Builder(this)
                     .setTitle("Update " + tag + " siap dipasang")
-                    .setMessage("Sudah terunduh di dalam aplikasi (tanpa buka GitHub). Pasang sekarang? (Android mewajibkan 1 ketukan + izin pasang sekali saja)")
+                    .setMessage("Versi " + tag + " sudah terunduh. Pasang sekarang?")
                     .setPositiveButton("Pasang", new DialogInterface.OnClickListener() {
                         @Override public void onClick(DialogInterface di, int w) { promptInstall(apk); }
                     })
@@ -668,6 +821,8 @@ public class MainActivity extends Activity {
             dir.mkdirs();
             r.setDestinationInExternalFilesDir(this, null, "update/norvex-r.apk");
             updateDownloadId = dm.enqueue(r);
+            synchronized (dmJobs) { dmJobs.put(updateDownloadId, "update"); }
+            pollDmProgress();
         } catch (Throwable t) {
             taskEnd("update");
             logError("update-dl", String.valueOf(t));
@@ -680,7 +835,7 @@ public class MainActivity extends Activity {
             try {
                 if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
                 long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
-                taskEnd("dl-http");
+                synchronized (dmJobs) { dmJobs.remove(id); }
                 if (id == updateDownloadId && id != -1) {
                     updateDownloadId = -1;
                     taskEnd("update");
@@ -689,10 +844,42 @@ public class MainActivity extends Activity {
                     try { tag = getSharedPreferences("nv", MODE_PRIVATE).getString(UPD_PREF_TAG, ""); } catch (Exception ignored) {}
                     if (apk.exists() && apk.length() > 0) showUpdateReadyDialog(apk, tag);
                     else { toast("Unduhan update gagal, coba lagi nanti"); logError("update-dl", "file hilang"); }
+                } else if (id == activeHttpDmId && id != -1) {
+                    // Satu antrean selesai -> cek STATUS beneran (gagal/batal
+                    // tetap memicu event selesai!) -> toast jujur -> berikutnya.
+                    activeHttpDmId = -1;
+                    taskEnd("dl-http");
+                    boolean ok = dmSuccess(ctx, id);
+                    String nm = activeHttpName;
+                    activeHttpName = "";
+                    if (ok) {
+                        httpFails = 0;
+                        try { if (!nm.isEmpty()) toast("Tersimpan: " + nm); } catch (Exception ignored) {}
+                    } else {
+                        logError("download-http", "gagal/batal id=" + id);
+                        try { toast("Gagal mengunduh " + (nm.isEmpty() ? "file" : nm)); } catch (Exception ignored) {}
+                    }
+                    pumpHttpQueue();
                 }
             } catch (Throwable t) { logError("receiver", String.valueOf(t)); }
         }
     };
+
+    // Status beneran unduhan DownloadManager (jangan percaya event selesai saja).
+    private boolean dmSuccess(Context ctx, long id) {
+        android.database.Cursor c = null;
+        try {
+            DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) return false;
+            c = dm.query(new DownloadManager.Query().setFilterById(id));
+            if (c != null && c.moveToFirst()) {
+                int st = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                return st == DownloadManager.STATUS_SUCCESSFUL;
+            }
+        } catch (Exception ignored) {}
+        finally { try { if (c != null) c.close(); } catch (Exception ignored) {} }
+        return false;
+    }
 
     private void promptInstall(File apk) {
         try {
@@ -730,8 +917,7 @@ public class MainActivity extends Activity {
                 }
             }
         } catch (Exception ignored) {}
-        // 2. WebView bisa kembali? kembali (riwayat halaman).
-        // (Catatan: pop-up web ditangani langkah 3 — riwayat web jarang dipakai.)
+        // 2. WebView tak dipakai untuk riwayat (satu halaman saja) -> langsung
         // 3. Tanya web: tutup pop-up teratas / minta-save / boleh keluar?
         try {
             web.evaluateJavascript("try{window.__norvexBack?window.__norvexBack():\"{\\\"exit\\\":true}\"}catch(e){\"{\\\"exit\\\":true}\"}",
@@ -747,10 +933,17 @@ public class MainActivity extends Activity {
         try {
             boolean exit = true;
             try {
-                if (v != null && v.length() > 2) {
-                    String unq = JSONObject.quote(v);
-                    JSONObject o = new JSONObject(v);
-                    exit = o.optBoolean("exit", true);
+                String s = (v == null) ? "" : v.trim();
+                // evaluateJavascript membungkus balasan dalam string JSON
+                // ("{\"exit\":true}") -> kupas dulu jadi {"exit":true}.
+                if (s.length() >= 2 && s.startsWith("\"")) {
+                    try { s = new JSONObject("{\"x\":" + s + "}").optString("x", s); }
+                    catch (Exception ignored) {}
+                }
+                if (s.startsWith("{")) {
+                    JSONObject o = new JSONObject(s);
+                    if (o.has("handled")) exit = !o.optBoolean("handled", false);
+                    else exit = o.optBoolean("exit", true);
                 }
             } catch (Exception e) { exit = true; }
             if (exit) showExitConfirm();
@@ -800,11 +993,13 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         hookCrashLogger(); // catat biang force-close ke folder error/
+        pruneOldLogs(); // buang trace/log/crash >14 hari (hemat storage mepet)
         trace("boot mulai");
         hideNav();
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.setBackgroundColor(0xFF000000); // hitam: selaras takik + tema gelap
         setContentView(root);
         // Keyboard: biar kolom ketik tak ketimpa (lihat fixKeyboardOverlap).
         try { getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Exception ignored) {}
@@ -866,6 +1061,16 @@ public class MainActivity extends Activity {
                 } catch (Throwable t) { logError("webview", String.valueOf(t)); }
             }
 
+            // HP lama (API<23): panggil versi lawas (versi baru tak dipanggil sistem).
+            @SuppressWarnings("deprecation")
+            @Override
+            public void onReceivedError(WebView view, int code, String desc, String url) {
+                try {
+                    logError("webview", "halaman: " + desc);
+                    showErrorDialog("Gagal membuka halaman. Periksa koneksi lalu buka lagi.");
+                } catch (Throwable t) { logError("webview", String.valueOf(t)); }
+            }
+
             // AdBlock level jaringan ala Sunny Gupta: cegat request iklan SEBELUM
             // diunduh. Halaman utama tak pernah diblokir; gagal cocok -> teruskan.
             @Override
@@ -876,7 +1081,7 @@ public class MainActivity extends Activity {
                         String url = req.getUrl().toString();
                         if (url != null && (url.startsWith("http://") || url.startsWith("https://"))
                                 && isAdHost(req.getUrl().getHost())) {
-                            trace("iklan diblokir: " + req.getUrl().getHost());
+                            adTrace(req.getUrl().getHost());
                             WebResourceResponse empty = emptyBlockedResponse(url);
                             if (empty != null) return empty;
                         }
@@ -893,7 +1098,7 @@ public class MainActivity extends Activity {
                         String host = null;
                         try { host = android.net.Uri.parse(url).getHost(); } catch (Exception ignored) {}
                         if (isAdHost(host)) {
-                            trace("iklan diblokir: " + host);
+                            adTrace(host);
                             WebResourceResponse empty = emptyBlockedResponse(url);
                             if (empty != null) return empty;
                         }
@@ -999,12 +1204,51 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    // File trace/log/crash dibatasi 14 hari terakhir: folder error/ tak boleh
+    // membengkak tanpa henti di HP storage mepet. Jalan di latar, 1x per buka.
+    private static boolean prunedOnce = false;
+
+    private void pruneOldLogs() {
+        try {
+            if (prunedOnce) return;
+            prunedOnce = true;
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        long cut = System.currentTimeMillis() - 14L * 24 * 60 * 60 * 1000;
+                        java.util.ArrayList<File> dirs = new java.util.ArrayList<File>();
+                        try {
+                            File base = baseDirExternal();
+                            if (base != null) dirs.add(new File(base, "error"));
+                        } catch (Exception ignored) {}
+                        try { dirs.add(new File(getFilesDir(), "error")); } catch (Exception ignored) {}
+                        try { dirs.add(getCacheDir()); } catch (Exception ignored) {}
+                        for (File d : dirs) {
+                            File[] fs = null;
+                            try { fs = d.listFiles(); } catch (Exception ignored) {}
+                            if (fs == null) continue;
+                            for (File f : fs) {
+                                try {
+                                    String n = f.getName();
+                                    if ((n.startsWith("trace-") || n.startsWith("log-") || n.startsWith("crash-"))
+                                            && f.lastModified() < cut) f.delete();
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }).start();
+        } catch (Exception ignored) {}
+    }
+
+    // Fullscreen imersif TANPA flag LAYOUT_*: LAYOUT_FULLSCREEN/LAYOUT_HIDE_NAV
+    // membuat window tak ikut mengecil saat keyboard muncul (adjustResize mati
+    // total di sebagian HP) — itu biang textbox ketutup. Tanpa LAYOUT_*,
+    // bar tetap sembunyi (FULLSCREEN+HIDE_NAV+IMMERSIVE_STICKY) tapi window
+    // resize normal + ganjal manual di fixKeyboardOverlap jalan.
     private void hideNav() {
         try {
             final int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                     | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                     | View.SYSTEM_UI_FLAG_FULLSCREEN;
             getWindow().getDecorView().setSystemUiVisibility(flags);
@@ -1087,6 +1331,19 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    // Trace iklan dibatasi (20/baris sesi): halaman penuh iklan bisa
+    // menembak ratusan request — file trace harian jangan membengkak.
+    private static int adTraceCount = 0;
+
+    private void adTrace(String host) {
+        try {
+            if (adTraceCount < 20) {
+                adTraceCount++;
+                trace("iklan diblokir: " + host + (adTraceCount == 20 ? " (+disenyapkan)" : ""));
+            }
+        } catch (Exception ignored) {}
+    }
+
     // Balasan kosong yang valid (200 OK): WebView anggap request selesai normal,
     // bukan koneksi putus — ini pencegah crash ala Sunny Gupta.
     private static WebResourceResponse emptyBlockedResponse(String url) {
@@ -1131,15 +1388,41 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // Keyboard menutupi kolom ketik (fullscreen mematikan adjustResize bawaan di
-    // sebagian HP): ukur tinggi keyboard dari bingkai terlihat, ganjal bawah
-    // WebView sebesar itu. Bila adjustResize sistem sudah bekerja, selisih ~0
-    // jadi tak berbuat apa-apa (tak ganda).
+    // Keyboard menutupi kolom ketik + takik kamera menutupi header: ganjal
+    // manual sebagai lapis kedua di atas adjustResize sistem. Sengaja diganjal
+    // WADAH (root), bukan WebView-nya: viewport web ikut menyusut sehingga
+    // #main (position:fixed; inset:0) + kolom ketik naik ke atas keyboard,
+    // dan header turun ke bawah takik. Ganjal WebView-nya langsung
+    // (web.setPadding) tak menggeser elemen fixed — itu biang "textbox gak
+    // naik" di build lama.
+    private int statusBarPx = -1; // cache tinggi status bar (tetap per HP)
+
+    // Tinggi takik: safe inset kamera, atau tinggi status bar bila tak ada.
+    private int getTopInset() {
+        int cut = 0;
+        try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                android.view.WindowInsets wi = getWindow().getDecorView().getRootWindowInsets();
+                if (wi != null && wi.getDisplayCutout() != null) cut = wi.getDisplayCutout().getSafeInsetTop();
+            }
+        } catch (Exception ignored) {}
+        if (statusBarPx < 0) {
+            int sb = 0;
+            try {
+                int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+                if (id > 0) sb = getResources().getDimensionPixelSize(id);
+            } catch (Exception ignored) {}
+            statusBarPx = sb;
+        }
+        return Math.max(cut, statusBarPx);
+    }
+
     private void fixKeyboardOverlap(final View root) {
         try {
             root.getViewTreeObserver().addOnGlobalLayoutListener(
                     new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
                         private int lastPad = -1;
+                        private int lastTop = -1;
                         @Override public void onGlobalLayout() {
                             try {
                                 if (web == null) return;
@@ -1150,9 +1433,16 @@ public class MainActivity extends Activity {
                                 if (kb < 0) kb = 0;
                                 int minKb = (int) (100 * getResources().getDisplayMetrics().density);
                                 int pad = (kb > minKb) ? kb : 0;
-                                if (pad != lastPad) {
+                                int top = getTopInset();
+                                if (pad != lastPad || top != lastTop) {
                                     lastPad = pad;
-                                    web.setPadding(0, 0, 0, pad);
+                                    lastTop = top;
+                                    try { web.setPadding(0, 0, 0, 0); } catch (Exception ignored) {}
+                                    root.setPadding(0, top, 0, pad);
+                                    try { root.requestLayout(); } catch (Exception ignored) {}
+                                    if (pad > 0) {
+                                        try { web.evaluateJavascript("try{var el=document.activeElement;if(el&&el.scrollIntoView)el.scrollIntoView({block:'nearest'});}catch(e){}", null); } catch (Exception ignored) {}
+                                    }
                                 }
                             } catch (Exception ignored) {}
                         }
@@ -1214,6 +1504,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        uiVisible = false;
         trace("jeda");
         // Checkpoint: minta web simpan state/backup SEKARANG (baterai aman, cepat).
         if (!pausedCheckpointSent) {
@@ -1225,6 +1516,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        uiVisible = true;
         pausedCheckpointSent = false;
         hideNav();
     }
