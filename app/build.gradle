@@ -11,10 +11,12 @@ android {
         minSdk 21
         targetSdk 34
         // Nomor versi OTOMATIS dari nomor build GitHub (tak perlu dipikir).
-        // Ditulis defensif: tak boleh null dalam kondisi apa pun.
+        // Ditulis defensif: tak boleh null/crash dalam kondisi apa pun.
         def vcEnv = System.getenv("VC")
-        versionCode vcEnv ? Integer.parseInt(vcEnv.trim()) : 1
-        versionName "1.0." + (vcEnv ? vcEnv.trim() : "1")
+        int vcNum = 1
+        try { vcNum = Integer.parseInt(String.valueOf(vcEnv == null ? "1" : vcEnv).trim()) } catch (Exception ignored) { vcNum = 1 }
+        versionCode vcNum
+        versionName "1.0." + vcNum
     }
 
     compileOptions {
