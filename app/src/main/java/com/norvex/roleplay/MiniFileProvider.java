@@ -22,10 +22,11 @@ public class MiniFileProvider extends ContentProvider {
 
     private static final String AUTH_SUFFIX = ".files";
     private static final int CODE_UPDATE = 1;
+    private static final String AUTH = "com.norvex.roleplay.files";
     private static final UriMatcher MATCHER = new UriMatcher(UriMatcher.NO_MATCH);
 
     static {
-        MATCHER.addURI("*", "update/*", CODE_UPDATE);
+        MATCHER.addURI(AUTH, "update/*", CODE_UPDATE);
     }
 
     private static String authority(Context ctx) {
