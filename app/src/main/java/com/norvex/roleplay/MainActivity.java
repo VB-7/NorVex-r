@@ -95,6 +95,9 @@ public class MainActivity extends Activity {
     private boolean pausedCheckpointSent = false;
     private long lastErrorDialogAt = 0;
     private long updateDownloadId = -1;
+    // Splash: WebView disembunyikan sampai web kirim {app_ready:true}.
+    private View splashView = null;
+    private boolean readyShown = false;
     private static final String UPD_PREF_TAG = "upd_tag"; // tag APK update yg sudah terunduh
 
     // ---------------- Jembatan JS (nama sama dengan MIT: window.AppInventor) ----------------
@@ -147,6 +150,7 @@ public class MainActivity extends Activity {
                 // file_chunk bisa ratusan pesan per file: jangan banjiri trace.
                 if (!o.has("file_chunk")) trace("pesan: " + kb.toString());
             } catch (Exception ignored) {}
+            if (o.has("app_ready")) { onAppReady(); return; } // splash -> tampil
             if (o.has("file_start")) { onFileStart(o.optJSONObject("file_start")); return; }
             if (o.has("file_chunk")) { onFileChunk(o.optJSONObject("file_chunk")); return; }
             if (o.has("file_end")) { onFileEnd(o.optJSONObject("file_end")); return; }
@@ -542,6 +546,71 @@ public class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    // ---------------- Splash (tutup saat web siap) ----------------
+
+    private final Runnable readyFallback = new Runnable() {
+        @Override public void run() { onAppReady(); }
+    };
+
+    private View buildSplash() {
+        try {
+            FrameLayout s = new FrameLayout(this);
+            s.setBackgroundColor(0xFF000000);
+            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+            box.setOrientation(android.widget.LinearLayout.VERTICAL);
+            box.setGravity(android.view.Gravity.CENTER);
+            FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            bp.gravity = android.view.Gravity.CENTER;
+            android.widget.TextView t = new android.widget.TextView(this);
+            t.setText("NorVex-R");
+            t.setTextSize(34);
+            t.setTextColor(0xFF00E5FF);
+            try { t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); } catch (Exception ignored) {}
+            t.setGravity(android.view.Gravity.CENTER);
+            android.widget.ProgressBar p = new android.widget.ProgressBar(this);
+            try {
+                if (p.getIndeterminateDrawable() != null)
+                    p.getIndeterminateDrawable().setColorFilter(0xFF00E5FF, android.graphics.PorterDuff.Mode.SRC_IN);
+            } catch (Exception ignored) {}
+            android.widget.LinearLayout.LayoutParams pp = new android.widget.LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            pp.gravity = android.view.Gravity.CENTER;
+            int m = (int) (18 * getResources().getDisplayMetrics().density);
+            pp.setMargins(0, m, 0, 0);
+            box.addView(t);
+            box.addView(p, pp);
+            android.widget.TextView s2 = new android.widget.TextView(this);
+            s2.setText("Menyiapkan ruang roleplay…");
+            s2.setTextSize(14);
+            s2.setTextColor(0xFF9AA7B4);
+            s2.setGravity(android.view.Gravity.CENTER);
+            box.addView(s2);
+            s.addView(box, bp);
+            return s;
+        } catch (Throwable th) { return null; }
+    }
+
+    private void onAppReady() {
+        try {
+            main.post(new Runnable() {
+                @Override public void run() {
+                    if (readyShown) return;
+                    readyShown = true;
+                    try { main.removeCallbacks(readyFallback); } catch (Exception ignored) {}
+                    try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Exception ignored) {}
+                    try {
+                        if (splashView != null && splashView.getParent() != null) {
+                            ((ViewGroup) splashView.getParent()).removeView(splashView);
+                        }
+                        splashView = null;
+                    } catch (Exception ignored) {}
+                    trace("web siap, splash tutup");
+                }
+            });
+        } catch (Throwable t) { logError("ready", String.valueOf(t)); }
     }
 
     // ---------------- Tugas latar (service + notifikasi) ----------------
@@ -1007,8 +1076,21 @@ public class MainActivity extends Activity {
         ensureStoragePerm(); // minta izin tulis SEKALI (HP Android 9/10)
 
         web = new WebView(this);
+        web.setVisibility(View.INVISIBLE); // tertutup splash sampai web kirim app_ready
         root.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Splash duluan (logo + animasi milik sendiri): user tak melihat
+        // proses loading web sama sekali — tak ada spinner/blank Perchance.
+        try {
+            splashView = buildSplash();
+            if (splashView != null) root.addView(splashView, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } catch (Exception ignored) {}
+        // Pengaman mentok: kalau sinyal siap tak kunjung datang (mis. web
+        // belum di-Save sehingga belum kirim app_ready), tampilkan web apa
+        // adanya setelah 20 dtk — jangan macet di splash.
+        main.postDelayed(readyFallback, 20000);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -1033,6 +1115,14 @@ public class MainActivity extends Activity {
         }
 
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                // Suntik AWAL (spinner luar muncul 1,5 dtk setelah buka —
+                // kalau nunggu selesai, sempat kelihatan).
+                injectCosmetic();
+            }
+
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
@@ -1373,7 +1463,8 @@ public class MainActivity extends Activity {
             "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El," +
             "#menuBarEl,#editorEl,#perchanceConsoleEl,#output-buttons-ctn," +
             "#outputLoadSpinner,#sandboxed-ad-provider-ctn-el," +
-            "header,footer,nav{display:none!important}";
+            "header,footer,nav{display:none!important}" +
+            "html,body{background:#000!important}";
 
     private void injectCosmetic() {
         try {
