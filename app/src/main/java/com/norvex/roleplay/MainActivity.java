@@ -97,7 +97,9 @@ public class MainActivity extends Activity {
     private long updateDownloadId = -1;
     // Splash: WebView disembunyikan sampai web kirim {app_ready:true}.
     private View splashView = null;
+    private android.widget.TextView splashStatus = null;
     private boolean readyShown = false;
+    private boolean pageDone = false;
     private static final String UPD_PREF_TAG = "upd_tag"; // tag APK update yg sudah terunduh
 
     // ---------------- Jembatan JS (nama sama dengan MIT: window.AppInventor) ----------------
@@ -364,6 +366,7 @@ public class MainActivity extends Activity {
     private long activeHttpDmId = -1;
     private String activeHttpName = "";
     private int httpFails = 0; // pengaman: gagal beruntun -> berhenti, jangan macet antrean
+    private volatile boolean destroyed = false; // true setelah onDestroy: hentikan thread latar
     private final java.util.Map<Long, String> dmJobs = new java.util.HashMap<Long, String>();
     private boolean dmPolling = false;
 
@@ -431,6 +434,7 @@ public class MainActivity extends Activity {
                     try {
                         DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
                         while (true) {
+                            if (destroyed) break; // activity mati: berhenti, jangan bocor
                             java.util.Map<Long, String> jobs;
                             synchronized (dmJobs) { jobs = new java.util.HashMap<Long, String>(dmJobs); }
                             if (jobs.isEmpty() || dm == null) break;
@@ -550,8 +554,11 @@ public class MainActivity extends Activity {
 
     // ---------------- Splash (tutup saat web siap) ----------------
 
-    private final Runnable readyFallback = new Runnable() {
+    private final Runnable showWebDelayed = new Runnable() {
         @Override public void run() { onAppReady(); }
+    };
+    private final Runnable absoluteFallback = new Runnable() {
+        @Override public void run() { onAppReady(); } // mentok 60 dtk: tampil apa adanya
     };
 
     private View buildSplash() {
@@ -562,14 +569,50 @@ public class MainActivity extends Activity {
             box.setOrientation(android.widget.LinearLayout.VERTICAL);
             box.setGravity(android.view.Gravity.CENTER);
             FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             bp.gravity = android.view.Gravity.CENTER;
             android.widget.TextView t = new android.widget.TextView(this);
             t.setText("NorVex-R");
-            t.setTextSize(34);
+            try { t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 34); } catch (Exception ignored) {}
             t.setTextColor(0xFF00E5FF);
             try { t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); } catch (Exception ignored) {}
             t.setGravity(android.view.Gravity.CENTER);
+            t.setSingleLine(true);
+            t.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            // Logo aplikasi di atas nama (pakai ikon launcher sendiri).
+            try {
+                android.widget.ImageView logo = new android.widget.ImageView(this);
+                try { logo.setImageResource(R.drawable.ic_launcher); } catch (Exception ignored) {}
+                int px = (int) (96 * getResources().getDisplayMetrics().density);
+                android.widget.LinearLayout.LayoutParams llp = new android.widget.LinearLayout.LayoutParams(px, px);
+                llp.gravity = android.view.Gravity.CENTER;
+                int mb = (int) (12 * getResources().getDisplayMetrics().density);
+                llp.setMargins(0, 0, 0, mb);
+                logo.setLayoutParams(llp);
+                try {
+                    android.view.animation.AlphaAnimation fade =
+                            new android.view.animation.AlphaAnimation(0f, 1f);
+                    fade.setDuration(600);
+                    fade.setFillAfter(true);
+                    logo.startAnimation(fade);
+                } catch (Exception ignored) {}
+                box.addView(logo, 0);
+            } catch (Exception ignored) {}
+            // Versi aplikasi di bawah nama (biar jelas build ke berapa).
+            try {
+                String vn = "";
+                try { vn = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) {}
+                android.widget.TextView v = new android.widget.TextView(this);
+                v.setText("v" + (vn == null || vn.isEmpty() ? "?" : vn));
+                try { v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14); } catch (Exception ignored) {}
+                v.setTextColor(0xFF9AA7B4);
+                v.setGravity(android.view.Gravity.CENTER);
+                v.setSingleLine(true);
+                v.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                box.addView(v);
+            } catch (Exception ignored) {}
             android.widget.ProgressBar p = new android.widget.ProgressBar(this);
             try {
                 if (p.getIndeterminateDrawable() != null)
@@ -584,10 +627,14 @@ public class MainActivity extends Activity {
             box.addView(p, pp);
             android.widget.TextView s2 = new android.widget.TextView(this);
             s2.setText("Menyiapkan ruang roleplay…");
-            s2.setTextSize(14);
+            try { s2.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14); } catch (Exception ignored) {}
             s2.setTextColor(0xFF9AA7B4);
             s2.setGravity(android.view.Gravity.CENTER);
+            s2.setSingleLine(false);
+            s2.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             box.addView(s2);
+            splashStatus = s2;
             s.addView(box, bp);
             return s;
         } catch (Throwable th) { return null; }
@@ -599,13 +646,15 @@ public class MainActivity extends Activity {
                 @Override public void run() {
                     if (readyShown) return;
                     readyShown = true;
-                    try { main.removeCallbacks(readyFallback); } catch (Exception ignored) {}
+                    try { main.removeCallbacks(showWebDelayed); } catch (Exception ignored) {}
+                    try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
                     try { if (web != null) web.setVisibility(View.VISIBLE); } catch (Exception ignored) {}
                     try {
                         if (splashView != null && splashView.getParent() != null) {
                             ((ViewGroup) splashView.getParent()).removeView(splashView);
                         }
                         splashView = null;
+                        splashStatus = null;
                     } catch (Exception ignored) {}
                     trace("web siap, splash tutup");
                 }
@@ -785,6 +834,7 @@ public class MainActivity extends Activity {
                     InputStream in = null;
                     try {
                         URL u = new URL("https://api.github.com/repos/" + UPDATE_REPO + "/releases/latest");
+                        c = (HttpURLConnection) u.openConnection();
                         c.setRequestProperty("User-Agent", "NorVex-R");
                         c.setRequestProperty("Accept", "application/vnd.github+json");
                         c.setConnectTimeout(15000);
@@ -911,8 +961,10 @@ public class MainActivity extends Activity {
                     File apk = new File(getExternalFilesDir(null), "update/norvex-r.apk");
                     String tag = "";
                     try { tag = getSharedPreferences("nv", MODE_PRIVATE).getString(UPD_PREF_TAG, ""); } catch (Exception ignored) {}
-                    if (apk.exists() && apk.length() > 0) showUpdateReadyDialog(apk, tag);
-                    else { toast("Unduhan update gagal, coba lagi nanti"); logError("update-dl", "file hilang"); }
+                    // SUKSES beneran (bukan gagal/batal): status DownloadManager +
+                    // file ada + berisi. Tanpa ini, APK setengah/basi dikira siap.
+                    if (dmSuccess(ctx, id) && apk.exists() && apk.length() > 0) showUpdateReadyDialog(apk, tag);
+                    else { toast("Unduhan update gagal, coba lagi nanti"); logError("update-dl", "file hilang/gagal"); }
                 } else if (id == activeHttpDmId && id != -1) {
                     // Satu antrean selesai -> cek STATUS beneran (gagal/batal
                     // tetap memicu event selesai!) -> toast jujur -> berikutnya.
@@ -970,6 +1022,109 @@ public class MainActivity extends Activity {
             try { startActivity(i); }
             catch (ActivityNotFoundException e) { toast("Tak ada pemasang paket"); logError("install", e.toString()); }
         } catch (Throwable t) { logError("install", String.valueOf(t)); }
+    }
+
+    // Dialog galat jaringan DITUNDA 5 dtk (debounce): di jaringan flaky,
+    // error sesaat lalu halaman selesai normal — jangan tuduh user dengan
+    // dialog padahal 3 dtk kemudian sembuh sendiri. Batal bila halaman selesai.
+    private final Runnable errorDlgDelayed = new Runnable() {
+        @Override public void run() {
+            try {
+                if (pageDone || readyShown) return;
+                showErrorDialog("Gagal membuka halaman. Periksa koneksi lalu buka lagi.");
+                onWebLoadError();
+            } catch (Exception ignored) {}
+        }
+    };
+
+    private void scheduleErrorDialog() {
+        try {
+            main.removeCallbacks(errorDlgDelayed);
+            if (!pageDone && !readyShown) main.postDelayed(errorDlgDelayed, 5000);
+        } catch (Exception ignored) {}
+    }
+
+    // Halaman GAGAL dimuat (sinyal hilang, kuota habis): jangan mentok hitam.
+    // Splash berubah jadi pesan + ketuk = muat ulang. Jalan hanya bila splash
+    // masih ada (web belum tampil); kalau web sudah tampil, cuma dialog.
+    private void onWebLoadError() {
+        try {
+            main.post(new Runnable() {
+                @Override public void run() {
+                    try {
+                        main.removeCallbacks(showWebDelayed);
+                        main.removeCallbacks(absoluteFallback);
+                    } catch (Exception ignored) {}
+                    try {
+                        if (!readyShown && splashStatus != null) {
+                            splashStatus.setText("Gagal memuat. Periksa koneksi, lalu ketuk layar untuk coba lagi.");
+                        }
+                        if (!readyShown && splashView != null) {
+                            try {
+                                splashView.setOnClickListener(new View.OnClickListener() {
+                                    @Override public void onClick(View v) { retryLoad(); }
+                                });
+                                splashView.setClickable(true);
+                            } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+            });
+        } catch (Exception ignored) {}
+    }
+
+    private void retryLoad() {
+        try {
+            pageDone = false;
+            readyShown = false;
+            if (splashStatus != null) {
+                try { splashStatus.setText("Memuat… 0%"); } catch (Exception ignored) {}
+            }
+            if (splashView != null) {
+                try { splashView.setOnClickListener(null); } catch (Exception ignored) {}
+            }
+            if (web != null) {
+                try { web.setVisibility(View.INVISIBLE); } catch (Exception ignored) {}
+                try { web.reload(); } catch (Exception ignored) {}
+            }
+            try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
+            main.postDelayed(absoluteFallback, 60000);
+            trace("muat ulang");
+        } catch (Throwable t) { logError("retry", String.valueOf(t)); }
+    }
+
+    // Bangkit dari renderer mati: tampilkan splash lagi (ada % + tombol coba),
+    // sembunyikan web mati, muat ulang. Dipakai juga saat pulih dari jeda.
+    private void recoverRenderer(boolean crash) {
+        try {
+            pageDone = false;
+            readyShown = false;
+            try { main.removeCallbacks(showWebDelayed); } catch (Exception ignored) {}
+            try { main.removeCallbacks(absoluteFallback); } catch (Exception ignored) {}
+            try {
+                if (splashView == null) splashView = buildSplash();
+                if (splashView != null) {
+                    try { splashView.setOnClickListener(null); } catch (Exception ignored) {}
+                    try {
+                        if (splashView.getParent() == null && web != null && web.getParent() != null) {
+                            ((ViewGroup) web.getParent()).addView(splashView, new FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                        }
+                    } catch (Exception ignored) {}
+                    try { splashView.setVisibility(View.VISIBLE); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
+            if (splashStatus != null) {
+                try { splashStatus.setText(crash ? "Kehabisan memori, memuat ulang…" : "Memuat ulang… 0%"); } catch (Exception ignored) {}
+            }
+            if (web != null) {
+                try { web.setVisibility(View.INVISIBLE); } catch (Exception ignored) {}
+                try { web.reload(); } catch (Exception ignored) {}
+            }
+            main.postDelayed(absoluteFallback, 60000);
+            if (crash) { try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {} }
+            trace("pulih renderer");
+        } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
 
     // ---------------- Back bertingkat ----------------
@@ -1089,8 +1244,9 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
         // Pengaman mentok: kalau sinyal siap tak kunjung datang (mis. web
         // belum di-Save sehingga belum kirim app_ready), tampilkan web apa
-        // adanya setelah 20 dtk — jangan macet di splash.
-        main.postDelayed(readyFallback, 20000);
+        // adanya — tapi JANGAN buta 20 dtk: tunggu halaman selesai dulu
+        // (progres % tampil di splash), mentok absolut 60 dtk.
+        main.postDelayed(absoluteFallback, 60000);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -1127,8 +1283,18 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 trace("halaman selesai");
+                pageDone = true;
                 startGreeting();
                 injectCosmetic();
+                // Halaman selesai -> tuduhan galat tadi batal (flaky sesaat).
+                try { main.removeCallbacks(errorDlgDelayed); } catch (Exception ignored) {}
+                // Halaman selesai + beri jeda lukis 3 dtk -> tampil (kalau
+                // sinyal app_ready belum datang). Splash tetap tutup cepat
+                // via app_ready bila web sudah di-Save.
+                try {
+                    main.removeCallbacks(showWebDelayed);
+                    if (!readyShown) main.postDelayed(showWebDelayed, 3000);
+                } catch (Exception ignored) {}
             }
 
             @Override
@@ -1145,9 +1311,12 @@ public class MainActivity extends Activity {
             public void onReceivedError(WebView view, WebResourceRequest req, android.webkit.WebResourceError err) {
                 try {
                     boolean main = (req == null) || req.isForMainFrame();
-                    String msg = "halaman: " + (err == null ? "?" : String.valueOf(err.getDescription()));
+                    String host = "";
+                    try { if (req != null && req.getUrl() != null) host = String.valueOf(req.getUrl().getHost()); } catch (Exception ignored) {}
+                    String msg = "web-" + (main ? "utama" : "sub") + (host.isEmpty() ? "" : "(" + host + ")")
+                            + ": " + (err == null ? "?" : String.valueOf(err.getDescription()));
                     logError("webview", msg);
-                    if (main) showErrorDialog("Gagal membuka halaman. Periksa koneksi lalu buka lagi.");
+                    if (main) scheduleErrorDialog();
                 } catch (Throwable t) { logError("webview", String.valueOf(t)); }
             }
 
@@ -1156,9 +1325,27 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedError(WebView view, int code, String desc, String url) {
                 try {
-                    logError("webview", "halaman: " + desc);
-                    showErrorDialog("Gagal membuka halaman. Periksa koneksi lalu buka lagi.");
+                    logError("webview", "web-utama(HP lama): " + desc);
+                    scheduleErrorDialog();
                 } catch (Throwable t) { logError("webview", String.valueOf(t)); }
+            }
+
+            // Proses tampil MATI (khas HP RAM kecil: sistem membunuh renderer
+            // saat sesak — gejala persis "web sempat berkedip lalu hitam
+            // selamanya", tanpa dialog/crash). Pulihkan: splash lagi + muat
+            // ulang, JANGAN diam hitam.
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                try {
+                    boolean crash = false;
+                    try { crash = detail != null && detail.didCrash(); } catch (Exception ignored) {}
+                    final boolean fCrash = crash;
+                    logError("renderer", "proses tampil mati" + (fCrash ? " (crash)" : " (dibunuh sistem, biasanya RAM)"));
+                    main.post(new Runnable() {
+                        @Override public void run() { recoverRenderer(fCrash); }
+                    });
+                } catch (Throwable t) { logError("renderer", String.valueOf(t)); }
+                return true; // kita yang tangani: jangan biarkan hitam
             }
 
             // AdBlock level jaringan ala Sunny Gupta: cegat request iklan SEBELUM
@@ -1223,6 +1410,18 @@ public class MainActivity extends Activity {
                     try { cb.onReceiveValue(null); } catch (Exception ignored) {}
                 }
                 return true;
+            }
+
+            // Progres loading -> tampil di splash ("Memuat… 37%"): di jaringan
+            // lambat user TAHU aplikasi bekerja, bukan macet.
+            @Override
+            public void onProgressChanged(WebView view, int newProgress) {
+                try {
+                    if (!readyShown && splashStatus != null) {
+                        splashStatus.setText("Memuat… " + newProgress + "%");
+                    }
+                } catch (Exception ignored) {}
+                try { super.onProgressChanged(view, newProgress); } catch (Exception ignored) {}
             }
         });
 
@@ -1336,8 +1535,14 @@ public class MainActivity extends Activity {
     // total di sebagian HP) — itu biang textbox ketutup. Tanpa LAYOUT_*,
     // bar tetap sembunyi (FULLSCREEN+HIDE_NAV+IMMERSIVE_STICKY) tapi window
     // resize normal + ganjal manual di fixKeyboardOverlap jalan.
+    // Niat: TAK ADA alis abu — bar sistem hitam total & sembunyi; kalau bocor
+    // (terlihat strip abu), sembunyikan lagi 2 dtk kemudian.
     private void hideNav() {
         try {
+            if (Build.VERSION.SDK_INT >= 21) {
+                try { getWindow().setStatusBarColor(0xFF000000); } catch (Exception ignored) {}
+                try { getWindow().setNavigationBarColor(0xFF000000); } catch (Exception ignored) {}
+            }
             final int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                     | View.SYSTEM_UI_FLAG_FULLSCREEN;
@@ -1349,6 +1554,20 @@ public class MainActivity extends Activity {
                     getWindow().setAttributes(getWindow().getAttributes());
                 } catch (Exception ignored) {}
             }
+            try {
+                getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
+                        new View.OnSystemUiVisibilityChangeListener() {
+                            @Override public void onSystemUiVisibilityChange(int visibility) {
+                                if ((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                                    try {
+                                        getWindow().getDecorView().postDelayed(new Runnable() {
+                                            @Override public void run() { hideNav(); }
+                                        }, 2000);
+                                    } catch (Exception ignored) {}
+                                }
+                            }
+                        });
+            } catch (Exception ignored) {}
         } catch (Exception ignored) {}
     }
 
@@ -1468,7 +1687,10 @@ public class MainActivity extends Activity {
 
     private void injectCosmetic() {
         try {
-            String js = "(function(){var s=document.getElementById('norvex-hide');" +
+            // documentElement bisa null bila disuntik di onPageStarted
+            // (terlalu awal) -> lewati saja, onPageFinished menyuntik lagi.
+            String js = "(function(){if(!document.documentElement){return;}" +
+                    "var s=document.getElementById('norvex-hide');" +
                     "if(!s){s=document.createElement('style');s.id='norvex-hide';" +
                     "document.documentElement.appendChild(s);}" +
                     "s.textContent='" + COSMETIC_CSS + "';" +
@@ -1568,12 +1790,16 @@ public class MainActivity extends Activity {
 
     // Izin tulis (HP Android 9/10, API<=29): tanpa ini folder perchance_app tak bisa
     // ditulis, semua diam-diam jatuh ke folder aplikasi (user tak menemukan file
-    // di file manager + tak ada izin di Setting aplikasi).
+    // di file manager + tak ada izin di Setting aplikasi). Minta SEKALI saja
+    // (dicatat): kalau user menolak permanen, jangan nagih tiap buka.
     private void ensureStoragePerm() {
         try {
             if (Build.VERSION.SDK_INT <= 29
                     && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) {
+                SharedPreferences sp = getSharedPreferences("nv", MODE_PRIVATE);
+                if (sp.getBoolean("storage_asked", false)) return;
+                try { sp.edit().putBoolean("storage_asked", true).apply(); } catch (Exception ignored) {}
                 requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
             }
         } catch (Exception ignored) {}
@@ -1646,9 +1872,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        destroyed = true; // hentikan thread intip-progres
         try { unregisterReceiver(dlReceiver); } catch (Exception ignored) {}
         try {
             main.removeCallbacks(greetRun);
+            main.removeCallbacks(showWebDelayed);
+            main.removeCallbacks(absoluteFallback);
+            main.removeCallbacks(errorDlgDelayed);
             if (web != null) {
                 ((ViewGroup) web.getParent()).removeView(web);
                 web.destroy();
