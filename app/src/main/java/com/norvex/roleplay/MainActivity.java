@@ -1423,20 +1423,19 @@ public class MainActivity extends Activity {
     // iklan, header/footer/navigasi) agar aplikasi kelihatan mandiri.
     // AMAN: iframe generator (#outputIframeEl di dalam #output/#main) tak
     // pernah disentuh — yang disembunyikan hanya kulit luarnya.
+    // b47: header/footer/nav DICABUT dari daftar (tersangka biang hitam b46).
+    // Kalau b47 tampil bersih = dia biangnya, jangan dipasang lagi.
     private static final String COSMETIC_CSS =
             "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
             "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El," +
             "#menuBarEl,#editorEl,#perchanceConsoleEl,#output-buttons-ctn," +
-            "#outputLoadSpinner,#sandboxed-ad-provider-ctn-el," +
-            "header,footer,nav{display:none!important}" +
+            "#outputLoadSpinner,#sandboxed-ad-provider-ctn-el{display:none!important}" +
             "html,body{background:#000!important}";
 
     private void injectCosmetic() {
-        // DIAGNOSIS b46 (sementara!): suntik CSS DIMATIKAN total — rules user
-        // (COSMETIC_CSS di bawah) utuh tersimpan, dipasang lagi setelah biang
-        // hitam ketemu. Kalau tanpa suntik web tampil = CSS biangnya.
-        // Kalau tetap hitam = biang di wrapper/WebView, bukan CSS.
-        if (true) return;
+        // b47: suntik DINYALAKAN LAGI, tapi TANPA header/footer/nav (tersangka
+        // utama b46 — elemen struktural yang dipakai Perchance menata layout).
+        // Rules user (6) + chrome Perchance tetap disembunyikan.
         try {
             // documentElement bisa null bila disuntik di onPageStarted
             // (terlalu awal) -> lewati saja, onPageFinished menyuntik lagi.
