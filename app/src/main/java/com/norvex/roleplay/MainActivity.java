@@ -819,6 +819,7 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 trace("halaman selesai");
                 startGreeting();
+                injectCosmetic();
             }
 
             @Override
@@ -1076,6 +1077,24 @@ public class MainActivity extends Activity {
             return new WebResourceResponse(mime, "UTF-8", new ByteArrayInputStream(new byte[0]));
         } catch (Exception ignored) {}
         return null;
+    }
+
+    // ---------------- Cosmetic (rules elemen ala uBlock: domain###id) ----------------
+    // Elemen milik halaman sendiri (bukan request iklan) tak bisa diblokir di
+    // level jaringan — caranya disembunyikan via CSS, persis seperti
+    // injectCosmeticHelper-nya Sunny Gupta. Daftar dari user (6 rules).
+    private static final String COSMETIC_CSS =
+            "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
+            "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El{display:none!important}";
+
+    private void injectCosmetic() {
+        try {
+            String js = "(function(){var s=document.getElementById('norvex-hide');" +
+                    "if(!s){s=document.createElement('style');s.id='norvex-hide';" +
+                    "document.documentElement.appendChild(s);}" +
+                    "s.textContent='" + COSMETIC_CSS + "';})();";
+            web.evaluateJavascript(js, null);
+        } catch (Exception ignored) {}
     }
 
     private void hideKeyboard() {
