@@ -88,4 +88,6 @@ jobs:
           gh release create "b${{ github.run_number }}" \
             --title "NorVex-R b${{ github.run_number }}" \
             --notes "Build otomatis. Aplikasi mengecek ini sendiri untuk update." \
-            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release/*.apk || \
+          gh release upload "b${{ github.run_number }}" \
+            app/build/outputs/apk/release/*.apk --clobber
