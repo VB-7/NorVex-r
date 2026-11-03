@@ -76,6 +76,18 @@ import java.util.Set;
 public class MainActivity extends Activity {
 
     private static final String START_URL = "https://perchance.org/norvex-r?is-mit";
+
+    // Halaman generator sendiri (yang boleh tampil di webview). Varian query
+    // (?is-mit dsb) tetap dihitung halaman sendiri.
+    private boolean isAppUrl(String u) {
+        try {
+            if (u == null) return false;
+            android.net.Uri p = android.net.Uri.parse(u);
+            if (!"perchance.org".equalsIgnoreCase(p.getHost())) return false;
+            String path = p.getPath();
+            return "/norvex-r".equals(path) || (path != null && path.startsWith("/norvex-r/"));
+        } catch (Exception e) { return false; }
+    }
     private static final String UPDATE_REPO = "VB-7/NorVex-r";
     private static final int GREET_TIMES = 5;
     private static final long GREET_EVERY_MS = 1500L;
@@ -130,6 +142,7 @@ public class MainActivity extends Activity {
 
     private static class PartState {
         String id, target, name, mime;
+        boolean silent; // b51: backup (.backup) ditulis DIAM (tanpa notif/toast)
         long size;
         File partFile;
         RandomAccessFile raf;
@@ -206,7 +219,11 @@ public class MainActivity extends Activity {
                 return;
             }
             parts.put(id, st);
-            taskStart("dl-" + id, "Menerima " + st.name);
+            // b51: backup (.backup) hukumnya DIAM — tanpa notifikasi, tanpa
+            // toast; user tak mau diganggu tiap aplikasi ke background.
+            st.silent = st.target != null && st.target.startsWith(".backup");
+            if (!st.silent) taskStart("dl-" + id, "Menerima " + st.name);
+            else trace("backup diam: " + st.name);
         } catch (Throwable t) { logError("file_start", String.valueOf(t)); }
     }
 
@@ -231,7 +248,7 @@ public class MainActivity extends Activity {
                     int pct = (int) (st.received * 100 / st.size);
                     if (pct != st.lastPct && (pct - st.lastPct >= 2 || pct >= 100)) {
                         st.lastPct = pct;
-                        taskProgress("dl-" + st.id, st.received, st.size, "Menerima " + st.name);
+                        if (!st.silent) taskProgress("dl-" + st.id, st.received, st.size, "Menerima " + st.name);
                     }
                 }
             } catch (Exception ignored) {}
@@ -243,7 +260,7 @@ public class MainActivity extends Activity {
             if (f == null) return;
             String id = f.optString("id", "");
             final PartState st = parts.remove(id);
-            taskEnd("dl-" + id);
+            if (st == null || !st.silent) taskEnd("dl-" + id);
             if (st == null) return;
             try { if (st.raf != null) st.raf.close(); } catch (Exception ignored) {}
             final File dest = resolveTarget(st.target, st.name);
@@ -261,7 +278,7 @@ public class MainActivity extends Activity {
                         final String nm = dest.getName();
                         main.post(new Runnable() {
                             @Override public void run() {
-                                toast("Tersimpan: " + nm);
+                                if (!st.silent) toast("Tersimpan: " + nm);
                                 trace("file tersimpan: " + nm);
                             }
                         });
@@ -1145,7 +1162,19 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 String u = (req != null && req.getUrl() != null) ? req.getUrl().toString() : "";
-                if (u.startsWith("http://") || u.startsWith("https://")) return false;
+                if (u.startsWith("http://") || u.startsWith("https://")) {
+                    // b51 (user: web lain jangan masuk webview): hanya halaman
+                    // generator sendiri yang boleh pindah di bingkai utama.
+                    // Tautan perchance lain -> buka di browser luar (riwayat
+                    // webview tetap bersih, tombol back tak pernah nyasar).
+                    boolean main = true;
+                    try { main = req == null || req.isForMainFrame(); } catch (Exception ignored) {}
+                    if (main && !isAppUrl(u)) {
+                        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u))); } catch (Exception ignored) {}
+                        return true;
+                    }
+                    return false;
+                }
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
                 } catch (ActivityNotFoundException ignored) {}
@@ -1255,6 +1284,9 @@ public class MainActivity extends Activity {
         pruneOldLogs(); // buang trace/log/crash >14 hari (hemat storage mepet)
         trace("boot mulai");
         hideNav();
+        // b51: kunci potret di kode juga (manifest sudah, sabuk pengaman ganda —
+        // sensor/konten landscape tak bisa memutar aplikasi).
+        try { setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT); } catch (Exception ignored) {}
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1355,44 +1387,18 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // Fullscreen imersif TANPA flag LAYOUT_*: LAYOUT_FULLSCREEN/LAYOUT_HIDE_NAV
-    // membuat window tak ikut mengecil saat keyboard muncul (adjustResize mati
-    // total di sebagian HP) — itu biang textbox ketutup. Tanpa LAYOUT_*,
-    // bar tetap sembunyi (FULLSCREEN+HIDE_NAV+IMMERSIVE_STICKY) + window
-    // resize normal (cara aplikasi MIT, tanpa ganjal manual).
-    // Niat: TAK ADA alis abu — bar sistem hitam total & sembunyi; kalau bocor
-    // (terlihat strip abu), sembunyikan lagi 2 dtk kemudian.
+    // b51 (user: JANGAN fullscreen, biar aman): bar sistem TAMPIL normal
+    // seperti aplikasi biasa. Hanya warnanya dikunci hitam agar selaras tema.
+    // Tanpa IMMERSIVE/LAYOUT_*: tak ada bar bocor, tak ada takik tertutup,
+    // keyboard resize bawaan berjalan apa adanya.
     private void hideNav() {
         try {
             if (Build.VERSION.SDK_INT >= 21) {
                 try { getWindow().setStatusBarColor(0xFF000000); } catch (Exception ignored) {}
                 try { getWindow().setNavigationBarColor(0xFF000000); } catch (Exception ignored) {}
             }
-            final int flags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_FULLSCREEN;
-            getWindow().getDecorView().setSystemUiVisibility(flags);
-            if (Build.VERSION.SDK_INT >= 28) {
-                try {
-                    getWindow().getAttributes().layoutInDisplayCutoutMode =
-                            android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                    getWindow().setAttributes(getWindow().getAttributes());
-                } catch (Exception ignored) {}
-            }
-            try {
-                getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
-                        new View.OnSystemUiVisibilityChangeListener() {
-                            @Override public void onSystemUiVisibilityChange(int visibility) {
-                                if ((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
-                                    try {
-                                        getWindow().getDecorView().postDelayed(new Runnable() {
-                                            @Override public void run() { hideNav(); }
-                                        }, 2000);
-                                    } catch (Exception ignored) {}
-                                }
-                            }
-                        });
-            } catch (Exception ignored) {}
+            try { getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN); } catch (Exception ignored) {}
+            try { getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE); } catch (Exception ignored) {}
         } catch (Exception ignored) {}
     }
 
@@ -1563,7 +1569,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
-        try { if (web != null) web.saveState(out); } catch (Exception ignored) {}
+        // b51 (user: webview jangan simpan state): riwayat webview SENGAJA
+        // tak disimpan — tiap buka selalu halaman generator yang segar.
     }
 
     @Override
