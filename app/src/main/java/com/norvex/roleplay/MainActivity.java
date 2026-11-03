@@ -1260,6 +1260,10 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.setBackgroundColor(0xFF000000); // hitam: selaras takik + tema gelap
         setContentView(root);
+        // b50: alis abu = latar window/tema yg bocor lewat status bar translusen
+        // (atau kanvas html). Kunci semua lapis jadi hitam.
+        try { getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0xFF000000)); } catch (Exception ignored) {}
+        try { getWindow().getDecorView().setBackgroundColor(0xFF000000); } catch (Exception ignored) {}
         // Keyboard: cukup adjustResize sistem (cara aplikasi MIT: tanpa ganjal
         // manual — ganjal manual + resize sistem = jarak hitam ganda).
         try { getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } catch (Exception ignored) {}
@@ -1432,7 +1436,8 @@ public class MainActivity extends Activity {
             "#minimalModeMenuBtn,#backToMinimalModeBtn,#adCtn," +
             "#adsSandboxIframeEl,#adShieldEl,#whyAdsButton1El," +
             "#menuBarEl{display:none!important}" +
-            "body{background:#0b0e14!important}";
+            "html,body{background:#0b0e14!important}"; // b50: html ikut digelapkan
+            // (kanvas paling luar; aman — bukan editorEl).
 
     private void injectCosmetic() {
         // b49: 6 rules + menuBarEl + body gelap (abu hilang, editorEl JANGAN disentuh).
