@@ -1574,15 +1574,24 @@ public class MainActivity extends Activity {
         }
     }
 
-    // Sistem melaporkan memori menipis: kosongkan cache RAM WebView (bukan disk,
-    // jadi unduhan/model/file tetap aman) agar renderer tidak dibunuh saat
-    // web sedang kerja berat (mis. bantuan AI di kartu).
+    // Sistem melaporkan memori menipis. DULU (b52): tiap trim level>=10 langsung
+    // clearCache + tulis trace di thread UI -> di HP pas-pasan trim datang
+    // bertubi-tubi -> cache dikosongkan lalu di-decode ulang terus-menerus
+    // = lag/panas/boros (decode-thrash). b53: hanya saat kritis (rate-limit
+    // 1x/60 dtk) atau saat aplikasi di latar (tak terlihat user).
+    private static long lastTrimClearAt = 0;
+
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         try {
-            trace("trim memori level=" + level);
-            if(level >= TRIM_MEMORY_RUNNING_LOW && web != null) {
+            if (web == null) return;
+            if (level >= TRIM_MEMORY_UI_HIDDEN) {
+                web.clearCache(false); // di latar: bebas, tak terlihat user
+            } else if (level >= TRIM_MEMORY_RUNNING_CRITICAL) {
+                long now = System.currentTimeMillis();
+                if (now - lastTrimClearAt < 60000) return;
+                lastTrimClearAt = now;
                 web.clearCache(false);
             }
         } catch (Exception ignored) {}
