@@ -1263,6 +1263,13 @@ public class MainActivity extends Activity {
                         "googleadservices.com", "googlesyndication.com",
                         "googletagmanager.com", "openx.net", "outbrain.com",
                         "pubmatic.com", "scorecardresearch.com", "taboola.com"
+                        // b62: dua host IKLAN/PELACAK tambahan yg terbukti lolos
+                        // di log user (a.magsrv.com = server iklan, 11x termuat +
+                        // dieksekusi; cloudflareinsights = analitik, 272x
+                        // retry-gagal). Domain fungsional (challenges captcha,
+                        // text-generation AI, huggingface embedder) JANGAN
+                        // diblokir.
+                        , "magsrv.com", "cloudflareinsights.com"
                     };
                     for (String b : blocked) {
                         if (h.equals(b) || h.endsWith("." + b)) return true;
