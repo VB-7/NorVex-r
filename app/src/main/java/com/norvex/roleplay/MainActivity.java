@@ -2,6 +2,7 @@ package com.norvex.roleplay;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DownloadManager;
@@ -1011,11 +1012,34 @@ public class MainActivity extends Activity {
     private long lastRendererKillAt = 0;
     private boolean pendingRecover = false;
 
+    private int recoverWaits = 0;
+
+    private boolean isMemLow() {
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return false;
+            ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+            am.getMemoryInfo(mi);
+            return mi.lowMemory;
+        } catch (Exception e) { return false; }
+    }
+
     private final Runnable recoverRun = new Runnable() {
         @Override public void run() {
             try {
                 if (destroyed) return;
                 if (!uiVisible) { pendingRecover = true; return; }
+                // b57: seperti aplikasi lain - saat RAM masih sesak, DIAM
+                // (stuck sesaat) sampai memori pulih, baru muat ulang.
+                // Reload saat sesak = langsung dibunuh lagi = loop.
+                if (isMemLow()) {
+                    recoverWaits++;
+                    if (recoverWaits < 30) {
+                        main.postDelayed(this, 2000);
+                        return;
+                    }
+                }
+                recoverWaits = 0;
                 pendingRecover = false;
                 setupFreshWebView();
             } catch (Throwable t) { logError("recover", String.valueOf(t)); }
