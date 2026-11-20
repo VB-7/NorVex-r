@@ -1284,9 +1284,9 @@ public class MainActivity extends Activity {
         pruneOldLogs(); // buang trace/log/crash >14 hari (hemat storage mepet)
         trace("boot mulai");
         hideNav();
-        // b51: kunci potret di kode juga (manifest sudah, sabuk pengaman ganda —
-        // sensor/konten landscape tak bisa memutar aplikasi).
-        try { setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT); } catch (Exception ignored) {}
+        // b52: kunci orientasi portrait DIHAPUS (dulu di sini + manifest).
+        // Kunci itu biang restart tiap ubah tinggi di mode dua aplikasi:
+        // sistem menganggap activity tak muat lalu menghancurkannya.
         FrameLayout root = new FrameLayout(this);
         root.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1406,6 +1406,14 @@ public class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) hideNav(); // jaga fullscreen (mis. setelah dialog sistem)
+    }
+
+    // b52: putar/resize (termasuk geser pembatas split-screen) hanya ubah ukuran:
+    // WebView MATCH_PARENT mengikuti sendiri, web TIDAK di-reload.
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        try { trace("config berubah"); } catch (Exception ignored) {}
     }
 
     /** Dorong sapaan native (superset is_mit) beberapa kali, lalu berhenti total. */
@@ -1564,6 +1572,20 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {}
         }
+    }
+
+    // Sistem melaporkan memori menipis: kosongkan cache RAM WebView (bukan disk,
+    // jadi unduhan/model/file tetap aman) agar renderer tidak dibunuh saat
+    // web sedang kerja berat (mis. bantuan AI di kartu).
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        try {
+            trace("trim memori level=" + level);
+            if(level >= TRIM_MEMORY_RUNNING_LOW && web != null) {
+                web.clearCache(false);
+            }
+        } catch (Exception ignored) {}
     }
 
     @Override
