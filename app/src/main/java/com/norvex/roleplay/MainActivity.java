@@ -157,13 +157,6 @@ public class MainActivity extends Activity {
         try {
             JSONObject o;
             try { o = new JSONObject(s); } catch (Exception e) { return; } // bukan JSON: abaikan
-            try {
-                java.util.Iterator<String> ks = o.keys();
-                StringBuilder kb = new StringBuilder();
-                while (ks.hasNext()) { if (kb.length() > 0) kb.append(","); kb.append(ks.next()); }
-                // file_chunk bisa ratusan pesan per file: jangan banjiri trace.
-                if (!o.has("file_chunk")) trace("pesan: " + kb.toString());
-            } catch (Exception ignored) {}
             if (o.has("app_ready")) { onAppReady(); return; } // web sudah tampil
             if (o.has("file_start")) { onFileStart(o.optJSONObject("file_start")); return; }
             if (o.has("file_chunk")) { onFileChunk(o.optJSONObject("file_chunk")); return; }
@@ -223,7 +216,6 @@ public class MainActivity extends Activity {
             // toast; user tak mau diganggu tiap aplikasi ke background.
             st.silent = st.target != null && st.target.startsWith(".backup");
             if (!st.silent) taskStart("dl-" + id, "Menerima " + st.name);
-            else trace("backup diam: " + st.name);
         } catch (Throwable t) { logError("file_start", String.valueOf(t)); }
     }
 
@@ -279,7 +271,6 @@ public class MainActivity extends Activity {
                         main.post(new Runnable() {
                             @Override public void run() {
                                 if (!st.silent) toast("Tersimpan: " + nm);
-                                trace("file tersimpan: " + nm);
                             }
                         });
                     } catch (final Exception e) {
@@ -392,7 +383,6 @@ public class MainActivity extends Activity {
         HttpJob j = new HttpJob();
         j.url = url; j.name = safe; j.mime = (mime == null ? "" : mime);
         httpQueue.add(j);
-        trace("antre unduhan: " + safe);
         pumpHttpQueue();
     }
 
@@ -415,7 +405,6 @@ public class MainActivity extends Activity {
             activeHttpName = j.name;
             synchronized (dmJobs) { dmJobs.put(id, "dl-http"); }
             taskStart("dl-http", "Mengunduh " + j.name);
-            trace("unduh http mulai: " + j.name);
             pollDmProgress();
         } catch (Exception e) { httpFail(e.toString()); }
     }
@@ -576,7 +565,6 @@ public class MainActivity extends Activity {
         try {
             if (readyShown) return;
             readyShown = true;
-            trace("web siap");
         } catch (Throwable t) { logError("ready", String.valueOf(t)); }
     }
 
@@ -645,7 +633,8 @@ public class MainActivity extends Activity {
             // Android 12+: start dari background DILARANG sistem (bukan bug
             // kita) -> catat ringan saja, jangan spam file error tiap detik.
             String m = String.valueOf(e);
-            if (m.contains("Background") || m.contains("NotAllowed") || m.contains("background")) trace("service bg ditolak");
+            // Background-ditolak itu normal di Android baru: abaikan diam-diam.
+            if (m.contains("Background") || m.contains("NotAllowed") || m.contains("background")) {}
             else logError("service", m);
         }
     }
@@ -673,37 +662,29 @@ public class MainActivity extends Activity {
         return getCacheDir();
     }
 
+    // Catatan galat: tulis di thread latar agar thread UI tak tersendat.
     private void logError(String tag, String msg) {
-        trace(tag + ": " + shortMsg(msg));
         try {
-            String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
-            String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
-            File f = new File(errorDir(), "log-" + day + ".txt");
-            FileOutputStream out = null;
-            try {
-                out = new FileOutputStream(f, true);
-                out.write(("[" + ts + "][" + tag + "] " + msg + "\n").getBytes("UTF-8"));
-            } finally {
-                try { if (out != null) out.close(); } catch (Exception ignored) {}
-            }
+            final String fTag = tag, fMsg = msg;
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+                        String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+                        File f = new File(errorDir(), "log-" + day + ".txt");
+                        FileOutputStream out = null;
+                        try {
+                            out = new FileOutputStream(f, true);
+                            out.write(("[" + ts + "][" + fTag + "] " + fMsg + "\n").getBytes("UTF-8"));
+                        } finally {
+                            try { if (out != null) out.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }).start();
         } catch (Exception ignored) {}
     }
 
-    // Jejak langkah (untuk buru force-close): ringan, selalu ditulis.
-    private void trace(String msg) {
-        try {
-            String day = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
-            String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
-            File f = new File(errorDir(), "trace-" + day + ".txt");
-            FileOutputStream out = null;
-            try {
-                out = new FileOutputStream(f, true);
-                out.write(("[" + ts + "] " + msg + "\n").getBytes("UTF-8"));
-            } finally {
-                try { if (out != null) out.close(); } catch (Exception ignored) {}
-            }
-        } catch (Exception ignored) {}
-    }
 
     private void showErrorDialog(final String msg) {        try {
             long now = System.currentTimeMillis();
@@ -768,12 +749,11 @@ public class MainActivity extends Activity {
                         int remote = parseTagCode(tag);
                         if (remote <= 0) return;
                         int mine = myVersionCode();
-                        if (remote <= mine) { trace("cek update: sudah terbaru"); return; }
+                        if (remote <= mine) return;
                         String apkUrl = null;
                         try { apkUrl = rel.getJSONArray("assets").getJSONObject(0).getString("browser_download_url"); } catch (Exception ignored) {}
                         if (apkUrl == null) return;
                         final String fUrl = apkUrl, fTag = tag;
-                        trace("update tersedia: " + fTag);
                         main.post(new Runnable() {
                             @Override public void run() { onUpdateFound(fUrl, fTag); }
                         });
@@ -816,7 +796,7 @@ public class MainActivity extends Activity {
                 showUpdateReadyDialog(apk, tag);
                 return;
             }
-            if (updateDownloadId != -1) { trace("update masih mengunduh: " + tag); return; }
+            if (updateDownloadId != -1) return;
             // Hapus APK lama dulu: kalau unduhan BARU gagal, file basi bertag
             // lama JANGAN dikira "siap dipasang" oleh penerima selesai.
             try {
@@ -824,7 +804,6 @@ public class MainActivity extends Activity {
                 if (stale.exists()) stale.delete();
             } catch (Exception ignored) {}
             sp.edit().putString(UPD_PREF_TAG, tag).apply();
-            trace("update mengunduh: " + tag);
             startUpdateDownload(apkUrl);
         } catch (Throwable t) { logError("update-found", String.valueOf(t)); }
     }
@@ -842,7 +821,6 @@ public class MainActivity extends Activity {
                     .create();
             pushDialog(d);
             d.show();
-            trace("update siap: " + tag);
         } catch (Throwable t) { logError("update-dlg", String.valueOf(t)); }
     }
 
@@ -1003,7 +981,6 @@ public class MainActivity extends Activity {
             if (web != null) {
                 try { web.reload(); } catch (Exception ignored) {}
             }
-            trace("muat ulang");
         } catch (Throwable t) { logError("retry", String.valueOf(t)); }
     }
 
@@ -1023,7 +1000,6 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
             setupFreshWebView();
             if (crash) { try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {} }
-            trace("pulih renderer (WebView baru)");
         } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
 
@@ -1151,7 +1127,6 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                trace("halaman selesai");
                 pageDone = true;
                 startGreeting();
                 injectCosmetic();
@@ -1271,7 +1246,6 @@ public class MainActivity extends Activity {
             }
         });
             web.loadUrl(START_URL);
-            trace("web dibuka");
         } catch (Throwable t) { logError("setupweb", String.valueOf(t)); }
     }
 
@@ -1282,7 +1256,6 @@ public class MainActivity extends Activity {
         super.onCreate(b);
         hookCrashLogger(); // catat biang force-close ke folder error/
         pruneOldLogs(); // buang trace/log/crash >14 hari (hemat storage mepet)
-        trace("boot mulai");
         hideNav();
         // b52: kunci orientasi portrait DIHAPUS (dulu di sini + manifest).
         // Kunci itu biang restart tiap ubah tinggi di mode dua aplikasi:
@@ -1408,13 +1381,6 @@ public class MainActivity extends Activity {
         if (hasFocus) hideNav(); // jaga fullscreen (mis. setelah dialog sistem)
     }
 
-    // b52: putar/resize (termasuk geser pembatas split-screen) hanya ubah ukuran:
-    // WebView MATCH_PARENT mengikuti sendiri, web TIDAK di-reload.
-    @Override
-    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        try { trace("config berubah"); } catch (Exception ignored) {}
-    }
 
     /** Dorong sapaan native (superset is_mit) beberapa kali, lalu berhenti total. */
     private void startGreeting() {
@@ -1428,7 +1394,7 @@ public class MainActivity extends Activity {
         public void run() {
             if (greetLeft <= 0) return;
             greetLeft--;
-            try { bridge.greetNative(); trace("salam native"); } catch (Exception ignored) {}
+            try { bridge.greetNative(); } catch (Exception ignored) {}
             if (greetLeft > 0) main.postDelayed(this, GREET_EVERY_MS);
         }
     };
@@ -1528,10 +1494,8 @@ public class MainActivity extends Activity {
                         if (base != null) ensureNoMedia(new File(base, "download"));
                     } catch (Exception ignored) {}
                     toast("Izin penyimpanan OK — file tersimpan di perchance_app/Roleplay");
-                    trace("izin tulis diberikan");
                 } else {
                     toast("Tanpa izin, file tersimpan di folder aplikasi (bukan perchance_app)");
-                    trace("izin tulis ditolak");
                 }
             }
         } catch (Exception ignored) {}
@@ -1541,7 +1505,6 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         uiVisible = false;
-        trace("jeda");
         // Checkpoint: minta web simpan state/backup SEKARANG (baterai aman, cepat).
         if (!pausedCheckpointSent) {
             pausedCheckpointSent = true;
