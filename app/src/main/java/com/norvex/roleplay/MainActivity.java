@@ -1270,6 +1270,12 @@ public class MainActivity extends Activity {
                         // text-generation AI, huggingface embedder) JANGAN
                         // diblokir.
                         , "magsrv.com", "cloudflareinsights.com"
+                        // b63: frame iklan ad-sandbox.perchance.org — di b62
+                        // terbukti request iklan mati TAPI frame-nya tetap
+                        // hidup dan eksekusi (beacon dari origin ad-sandbox).
+                        // Blokir dokumen frame-nya sekalian. Satu-satunya
+                        // frame pihak-iklan yg terlihat di log.
+                        , "ad-sandbox.perchance.org"
                     };
                     for (String b : blocked) {
                         if (h.equals(b) || h.endsWith("." + b)) return true;
