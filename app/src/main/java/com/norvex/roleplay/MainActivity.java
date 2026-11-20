@@ -600,6 +600,7 @@ public class MainActivity extends Activity {
 
     private void taskEnd(String id) {
         try {
+            try { lastProgressSent.remove(id == null ? "" : id); } catch (Exception ignored) {}
             Intent i = new Intent(this, TaskService.class);
             i.setAction(TaskService.ACT_END);
             i.putExtra(TaskService.EXTRA_ID, id == null ? "" : id);
@@ -611,10 +612,26 @@ public class MainActivity extends Activity {
     // Diam saat aplikasi di latar: service tak boleh dibangunkan dari
     // background di Android baru (melempar tiap detik = spam log + baterai).
     private volatile boolean uiVisible = true;
+    // b55: throttle progres - tiap potong file dulu selalu bangunkan service.
+    // Sekarang: kirim bila maju >=5 persen atau >=1,5 dtk berlalu, atau selesai.
+    private final Map<String, long[]> lastProgressSent = new HashMap<String, long[]>();
 
     private void taskProgress(String id, long done, long total, String label) {
         try {
             if (!uiVisible) return;
+            String key = (id == null) ? "" : id;
+            boolean finished = (total > 0 && done >= total);
+            if (!finished) {
+                long now = System.currentTimeMillis();
+                long[] last = lastProgressSent.get(key);
+                if (last != null) {
+                    long step = (total > 0) ? Math.max(total / 20, 1) : Long.MAX_VALUE;
+                    if (now - last[0] < 1500 && done - last[1] < step) return;
+                }
+                lastProgressSent.put(key, new long[]{now, done});
+            } else {
+                lastProgressSent.remove(key);
+            }
             Intent i = new Intent(this, TaskService.class);
             i.setAction(TaskService.ACT_PROGRESS);
             i.putExtra(TaskService.EXTRA_ID, id == null ? "" : id);
