@@ -2,6 +2,7 @@ package com.norvex.roleplay;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DownloadManager;
@@ -489,6 +490,22 @@ public class MainActivity extends Activity {
     private static class PreviewDialog extends Dialog {
         private final String url;
         private float downY = -1;
+        private WebView previewWeb = null;
+
+        // b60: WebView pratinjau WAJIB dihancurkan saat ditutup. Dulu tidak:
+        // tiap buka gambar menambah 1 renderer yang tak pernah mati = bocor
+        // menumpuk sampai RAM sesak (kandidat kuat biang crash).
+        @Override
+        public void dismiss() {
+            try {
+                if (previewWeb != null) {
+                    try { ((ViewGroup) previewWeb.getParent()).removeView(previewWeb); } catch (Exception ignored) {}
+                    try { previewWeb.destroy(); } catch (Exception ignored) {}
+                    previewWeb = null;
+                }
+            } catch (Exception ignored) {}
+            try { super.dismiss(); } catch (Exception ignored) {}
+        }
 
         PreviewDialog(Context ctx, String u) {
             super(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
@@ -503,6 +520,7 @@ public class MainActivity extends Activity {
             root.setBackgroundColor(0xFF000000);
             setContentView(root);
             WebView w = new WebView(getContext());
+            previewWeb = w;
             root.addView(w, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             WebSettings s = w.getSettings();
@@ -1002,50 +1020,32 @@ public class MainActivity extends Activity {
     }
 
     // Renderer mati: WebView yang mati TAK BISA dipakai lagi (aturan Android).
-    // b58: DULU auto-reload (langsung/backoff/tunggu-memori) - di HP yang
-    // RAM-nya pasti drop di awal, tiap reload = boot berat = dibunuh lagi =
-    // loop selamanya. SEKARANG: crash beneran = langsung reload; dibunuh
-    // sistem = layar tunggu ringan + tombol MUAT ULANG manual. Tanpa reload
-    // otomatis, tanpa loop. Ketikan aman (checkpoint web).
-    private int deadTimes = 0;
-    private String deadCause = "sistem";
+    // b60: SEMUA pengaman DIHAPUS (auto-reload/backoff/layar-tunggu/manual/
+    // clearCache-trim) + KEBOCORAN DIPERBAIKI (WebView pratinjau kini
+    // dihancurkan saat ditutup - dulu tiap buka gambar menumpuk renderer).
+    // Mati = dibiarkan mati seperti Sunny: tanpa reload, tanpa loop.
+    // Satu-satunya yang tersisa: pencatat sebab+memori di bawah (tanpa tindakan).
 
-    private void showDeadView() {
+    private String memSnapshot() {
         try {
-            if (webRoot == null) return;
-            try { webRoot.removeAllViews(); } catch (Exception ignored) {}
-            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
-            box.setOrientation(android.widget.LinearLayout.VERTICAL);
-            box.setGravity(android.view.Gravity.CENTER);
-            int pad = (int) (24 * getResources().getDisplayMetrics().density);
-            box.setPadding(pad, pad, pad, pad);
-            android.widget.TextView msg = new android.widget.TextView(this);
-            msg.setTextColor(0xFFCCCCCC);
-            msg.setTextSize(16);
-            msg.setGravity(android.view.Gravity.CENTER);
-            String t = "sistem".equals(deadCause)
-                    ? "Web dibebaskan sistem (RAM penuh)."
-                    : "Web crash.";
-            if (deadTimes > 1) t += "\nGagal " + deadTimes + "x - tunggu HP longgar dulu.";
-            t += "\nKetikan aman (tersimpan otomatis).";
-            msg.setText(t);
-            android.widget.Button reload = new android.widget.Button(this);
-            reload.setText("Muat ulang");
-            reload.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    try { setupFreshWebView(); } catch (Exception ignored) {}
-                }
-            });
-            box.addView(msg);
-            android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-            lp.topMargin = pad;
-            box.addView(reload, lp);
-            webRoot.addView(box, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        } catch (Throwable t) { logError("deadview", String.valueOf(t)); }
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            long availMB = -1;
+            boolean low = false;
+            long pssMB = -1;
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                availMB = mi.availMem / 1048576L;
+                low = mi.lowMemory;
+                try {
+                    android.os.Debug.MemoryInfo[] arr = am.getProcessMemoryInfo(new int[]{android.os.Process.myPid()});
+                    if (arr != null && arr.length > 0 && arr[0] != null) pssMB = arr[0].getTotalPss() / 1024;
+                } catch (Exception ignored) {}
+            }
+            return " [bebas=" + availMB + "MB rendah=" + low + " pss=" + pssMB + "MB]";
+        } catch (Exception e) { return ""; }
     }
+
 
 
     private void recoverRenderer(boolean crash) {
@@ -1059,9 +1059,8 @@ public class MainActivity extends Activity {
                     web = null;
                 }
             } catch (Exception ignored) {}
-            deadTimes++;
-            deadCause = crash ? "crash" : "sistem";
-            showDeadView();
+            // b60: pengaman DIHAPUS. Mati = dibiarkan mati (seperti Sunny).
+            // Hidup lagi hanya bila aplikasi dibuka ulang dari awal.
         } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
 
@@ -1193,7 +1192,6 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 pageDone = true;
-                deadTimes = 0;
                 startGreeting();
                 injectCosmetic();
                 // Halaman selesai -> tuduhan galat tadi batal (flaky sesaat).
@@ -1253,7 +1251,7 @@ public class MainActivity extends Activity {
                     boolean crash = false;
                     try { crash = detail != null && detail.didCrash(); } catch (Exception ignored) {}
                     final boolean fCrash = crash;
-                    logError("renderer", "proses tampil mati" + (fCrash ? " (crash)" : " (dibunuh sistem, biasanya RAM)"));
+                    logError("renderer", "proses tampil mati" + (fCrash ? " (crash)" : " (dibunuh sistem, biasanya RAM)") + memSnapshot());
                     main.post(new Runnable() {
                         @Override public void run() { recoverRenderer(fCrash); }
                     });
@@ -1603,28 +1601,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    // Sistem melaporkan memori menipis. DULU (b52): tiap trim level>=10 langsung
-    // clearCache + tulis trace di thread UI -> di HP pas-pasan trim datang
-    // bertubi-tubi -> cache dikosongkan lalu di-decode ulang terus-menerus
-    // = lag/panas/boros (decode-thrash). b53: hanya saat kritis (rate-limit
-    // 1x/60 dtk) atau saat aplikasi di latar (tak terlihat user).
-    private static long lastTrimClearAt = 0;
 
-    @Override
-    public void onTrimMemory(int level) {
-        super.onTrimMemory(level);
-        try {
-            if (web == null) return;
-            if (level >= TRIM_MEMORY_UI_HIDDEN) {
-                web.clearCache(false); // di latar: bebas, tak terlihat user
-            } else if (level >= TRIM_MEMORY_RUNNING_CRITICAL) {
-                long now = System.currentTimeMillis();
-                if (now - lastTrimClearAt < 60000) return;
-                lastTrimClearAt = now;
-                web.clearCache(false);
-            }
-        } catch (Exception ignored) {}
-    }
 
     @Override
     protected void onSaveInstanceState(Bundle out) {
