@@ -1008,6 +1008,7 @@ public class MainActivity extends Activity {
     // sistem = layar tunggu ringan + tombol MUAT ULANG manual. Tanpa reload
     // otomatis, tanpa loop. Ketikan aman (checkpoint web).
     private int deadTimes = 0;
+    private String deadCause = "sistem";
 
     private void showDeadView() {
         try {
@@ -1022,7 +1023,9 @@ public class MainActivity extends Activity {
             msg.setTextColor(0xFFCCCCCC);
             msg.setTextSize(16);
             msg.setGravity(android.view.Gravity.CENTER);
-            String t = "Web dibebaskan sistem (RAM penuh).";
+            String t = "sistem".equals(deadCause)
+                    ? "Web dibebaskan sistem (RAM penuh)."
+                    : "Web crash.";
             if (deadTimes > 1) t += "\nGagal " + deadTimes + "x - tunggu HP longgar dulu.";
             t += "\nKetikan aman (tersimpan otomatis).";
             msg.setText(t);
@@ -1056,13 +1059,8 @@ public class MainActivity extends Activity {
                     web = null;
                 }
             } catch (Exception ignored) {}
-            if (crash) {
-                deadTimes = 0;
-                setupFreshWebView();
-                try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {}
-                return;
-            }
             deadTimes++;
+            deadCause = crash ? "crash" : "sistem";
             showDeadView();
         } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
