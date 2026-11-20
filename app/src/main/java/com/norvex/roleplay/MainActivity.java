@@ -1002,8 +1002,26 @@ public class MainActivity extends Activity {
     }
 
     // Bangkit dari renderer mati: WebView yang mati TAK BISA dipakai lagi
-    // (aturan resmi Android) -> cabut + hancurkan + buat BARU yang segar,
-    // langsung buka halaman (tanpa tirai). Dipakai juga saat pulih dari jeda.
+    // (aturan resmi Android) -> cabut + hancurkan + buat BARU yang segar.
+    // b56: DULU langsung reload full tiap mati -> saat dibunuh sistem karena
+    // RAM sesak, reload full = spike lagi = dibunuh lagi = lingkaran setan.
+    // Sekarang: crash beneran = langsung reload; dibunuh sistem = backoff
+    // (2-20 dtk, makin sering makin lama) + tunda bila aplikasi di latar.
+    private int rendererKillStreak = 0;
+    private long lastRendererKillAt = 0;
+    private boolean pendingRecover = false;
+
+    private final Runnable recoverRun = new Runnable() {
+        @Override public void run() {
+            try {
+                if (destroyed) return;
+                if (!uiVisible) { pendingRecover = true; return; }
+                pendingRecover = false;
+                setupFreshWebView();
+            } catch (Throwable t) { logError("recover", String.valueOf(t)); }
+        }
+    };
+
     private void recoverRenderer(boolean crash) {
         try {
             pageDone = false;
@@ -1015,8 +1033,26 @@ public class MainActivity extends Activity {
                     web = null;
                 }
             } catch (Exception ignored) {}
-            setupFreshWebView();
-            if (crash) { try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {} }
+            if (crash) {
+                rendererKillStreak = 0;
+                setupFreshWebView();
+                try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {}
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if (now - lastRendererKillAt < 60000) rendererKillStreak++;
+            else rendererKillStreak = 1;
+            lastRendererKillAt = now;
+            if (!uiVisible) {
+                pendingRecover = true;
+                return;
+            }
+            main.removeCallbacks(recoverRun);
+            long delay = Math.min(2000L * rendererKillStreak, 20000L);
+            if (delay > 0) {
+                try { toast("Web dibebaskan sistem, muat lagi " + (delay / 1000) + " dtk..."); } catch (Exception ignored) {}
+            }
+            main.postDelayed(recoverRun, delay);
         } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
 
@@ -1535,6 +1571,11 @@ public class MainActivity extends Activity {
         uiVisible = true;
         pausedCheckpointSent = false;
         hideNav();
+        if (pendingRecover) {
+            pendingRecover = false;
+            main.removeCallbacks(recoverRun);
+            main.post(recoverRun);
+        }
     }
 
     @Override
@@ -1591,6 +1632,7 @@ public class MainActivity extends Activity {
         try {
             main.removeCallbacks(greetRun);
             main.removeCallbacks(errorDlgDelayed);
+            main.removeCallbacks(recoverRun);
             if (web != null) {
                 ((ViewGroup) web.getParent()).removeView(web);
                 web.destroy();
