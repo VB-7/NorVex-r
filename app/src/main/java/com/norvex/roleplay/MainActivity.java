@@ -1244,6 +1244,55 @@ public class MainActivity extends Activity {
             }
 
             // Proses tampil MATI (tanpa dialog/crash). Pulihkan: WebView baru +
+            // b61: blokir iklan/pelacak di level JARINGAN (seperti AdBlocker
+            // bawaan Sunny CustomWebView — daftar host sama). Dulu elemen iklan
+            // hanya disembunyikan via CSS tapi tetap DIUNDUH + DIEKSEKUSI di
+            // dalam renderer: beban ekstra yang di MIT/browser tidak ada, dan
+            // kandidat kuat kenapa renderer kita mati duluan saat arus sesak
+            // (rumah roboh, bukan mesin). Perchance sendiri tak tersentuh.
+            private boolean isAdUrl(String u) {
+                try {
+                    if (u == null) return false;
+                    android.net.Uri p = android.net.Uri.parse(u);
+                    String h = p == null ? null : p.getHost();
+                    if (h == null) return false;
+                    h = h.toLowerCase(java.util.Locale.US);
+                    String[] blocked = {
+                        "adnxs.com", "adsystem.com", "amazon-adsystem.com",
+                        "criteo.com", "doubleclick.net", "google-analytics.com",
+                        "googleadservices.com", "googlesyndication.com",
+                        "googletagmanager.com", "openx.net", "outbrain.com",
+                        "pubmatic.com", "scorecardresearch.com", "taboola.com"
+                    };
+                    for (String b : blocked) {
+                        if (h.equals(b) || h.endsWith("." + b)) return true;
+                    }
+                    if ((h.equals("facebook.com") || h.endsWith(".facebook.com"))) {
+                        String path = String.valueOf(p.getPath());
+                        if (path.startsWith("/tr")) return true;
+                    }
+                } catch (Exception ignored) {}
+                return false;
+            }
+
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                try {
+                    String u = (req != null && req.getUrl() != null) ? req.getUrl().toString() : "";
+                    if (isAdUrl(u)) return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                } catch (Exception ignored) {}
+                try { return super.shouldInterceptRequest(view, req); } catch (Exception e) { return null; }
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+                try {
+                    if (isAdUrl(url)) return new WebResourceResponse("text/plain", "utf-8", new ByteArrayInputStream(new byte[0]));
+                } catch (Exception ignored) {}
+                try { return super.shouldInterceptRequest(view, url); } catch (Exception e) { return null; }
+            }
+
             // muat ulang, JANGAN diam hitam.
             @Override
             public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
