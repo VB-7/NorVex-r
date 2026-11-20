@@ -2,7 +2,6 @@ package com.norvex.roleplay;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DownloadManager;
@@ -1002,49 +1001,49 @@ public class MainActivity extends Activity {
         } catch (Throwable t) { logError("retry", String.valueOf(t)); }
     }
 
-    // Bangkit dari renderer mati: WebView yang mati TAK BISA dipakai lagi
-    // (aturan resmi Android) -> cabut + hancurkan + buat BARU yang segar.
-    // b56: DULU langsung reload full tiap mati -> saat dibunuh sistem karena
-    // RAM sesak, reload full = spike lagi = dibunuh lagi = lingkaran setan.
-    // Sekarang: crash beneran = langsung reload; dibunuh sistem = backoff
-    // (2-20 dtk, makin sering makin lama) + tunda bila aplikasi di latar.
-    private int rendererKillStreak = 0;
-    private long lastRendererKillAt = 0;
-    private boolean pendingRecover = false;
+    // Renderer mati: WebView yang mati TAK BISA dipakai lagi (aturan Android).
+    // b58: DULU auto-reload (langsung/backoff/tunggu-memori) - di HP yang
+    // RAM-nya pasti drop di awal, tiap reload = boot berat = dibunuh lagi =
+    // loop selamanya. SEKARANG: crash beneran = langsung reload; dibunuh
+    // sistem = layar tunggu ringan + tombol MUAT ULANG manual. Tanpa reload
+    // otomatis, tanpa loop. Ketikan aman (checkpoint web).
+    private int deadTimes = 0;
 
-    private int recoverWaits = 0;
-
-    private boolean isMemLow() {
+    private void showDeadView() {
         try {
-            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) return false;
-            ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
-            am.getMemoryInfo(mi);
-            return mi.lowMemory;
-        } catch (Exception e) { return false; }
+            if (webRoot == null) return;
+            try { webRoot.removeAllViews(); } catch (Exception ignored) {}
+            android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+            box.setOrientation(android.widget.LinearLayout.VERTICAL);
+            box.setGravity(android.view.Gravity.CENTER);
+            int pad = (int) (24 * getResources().getDisplayMetrics().density);
+            box.setPadding(pad, pad, pad, pad);
+            android.widget.TextView msg = new android.widget.TextView(this);
+            msg.setTextColor(0xFFCCCCCC);
+            msg.setTextSize(16);
+            msg.setGravity(android.view.Gravity.CENTER);
+            String t = "Web dibebaskan sistem (RAM penuh).";
+            if (deadTimes > 1) t += "\nGagal " + deadTimes + "x - tunggu HP longgar dulu.";
+            t += "\nKetikan aman (tersimpan otomatis).";
+            msg.setText(t);
+            android.widget.Button reload = new android.widget.Button(this);
+            reload.setText("Muat ulang");
+            reload.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    try { setupFreshWebView(); } catch (Exception ignored) {}
+                }
+            });
+            box.addView(msg);
+            android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = pad;
+            box.addView(reload, lp);
+            webRoot.addView(box, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } catch (Throwable t) { logError("deadview", String.valueOf(t)); }
     }
 
-    private final Runnable recoverRun = new Runnable() {
-        @Override public void run() {
-            try {
-                if (destroyed) return;
-                if (!uiVisible) { pendingRecover = true; return; }
-                // b57: seperti aplikasi lain - saat RAM masih sesak, DIAM
-                // (stuck sesaat) sampai memori pulih, baru muat ulang.
-                // Reload saat sesak = langsung dibunuh lagi = loop.
-                if (isMemLow()) {
-                    recoverWaits++;
-                    if (recoverWaits < 30) {
-                        main.postDelayed(this, 2000);
-                        return;
-                    }
-                }
-                recoverWaits = 0;
-                pendingRecover = false;
-                setupFreshWebView();
-            } catch (Throwable t) { logError("recover", String.valueOf(t)); }
-        }
-    };
 
     private void recoverRenderer(boolean crash) {
         try {
@@ -1058,25 +1057,13 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {}
             if (crash) {
-                rendererKillStreak = 0;
+                deadTimes = 0;
                 setupFreshWebView();
                 try { toast("Web dimuat ulang (memori penuh)"); } catch (Exception ignored) {}
                 return;
             }
-            long now = System.currentTimeMillis();
-            if (now - lastRendererKillAt < 60000) rendererKillStreak++;
-            else rendererKillStreak = 1;
-            lastRendererKillAt = now;
-            if (!uiVisible) {
-                pendingRecover = true;
-                return;
-            }
-            main.removeCallbacks(recoverRun);
-            long delay = Math.min(2000L * rendererKillStreak, 20000L);
-            if (delay > 0) {
-                try { toast("Web dibebaskan sistem, muat lagi " + (delay / 1000) + " dtk..."); } catch (Exception ignored) {}
-            }
-            main.postDelayed(recoverRun, delay);
+            deadTimes++;
+            showDeadView();
         } catch (Throwable t) { logError("recover", String.valueOf(t)); }
     }
 
@@ -1170,8 +1157,11 @@ public class MainActivity extends Activity {
     private void setupFreshWebView() {
         try {
             web = new WebView(this);
-            if (webRoot != null) webRoot.addView(web, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            if (webRoot != null) {
+                try { webRoot.removeAllViews(); } catch (Exception ignored) {}
+                webRoot.addView(web, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            }
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -1205,6 +1195,7 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 pageDone = true;
+                deadTimes = 0;
                 startGreeting();
                 injectCosmetic();
                 // Halaman selesai -> tuduhan galat tadi batal (flaky sesaat).
@@ -1595,11 +1586,6 @@ public class MainActivity extends Activity {
         uiVisible = true;
         pausedCheckpointSent = false;
         hideNav();
-        if (pendingRecover) {
-            pendingRecover = false;
-            main.removeCallbacks(recoverRun);
-            main.post(recoverRun);
-        }
     }
 
     @Override
@@ -1656,7 +1642,6 @@ public class MainActivity extends Activity {
         try {
             main.removeCallbacks(greetRun);
             main.removeCallbacks(errorDlgDelayed);
-            main.removeCallbacks(recoverRun);
             if (web != null) {
                 ((ViewGroup) web.getParent()).removeView(web);
                 web.destroy();
