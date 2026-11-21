@@ -1647,6 +1647,13 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        // b64: putar/resize (split-screen, keyboard, rotasi) TANPA hancur +
+        // TANPA reload — WebView MATCH_PARENT ikut resize sendiri.
+    }
+
+    @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
         if (req == FILE_REQ) {
