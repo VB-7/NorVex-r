@@ -526,6 +526,16 @@ public class MainActivity extends Activity {
             WebSettings s = w.getSettings();
             s.setJavaScriptEnabled(false);
             s.setBuiltInZoomControls(true);
+            // b65 (aturan internet: SEMUA WebView wajib tangani renderer
+            // mati, atau crash-nya bisa bunuh aplikasi): pratinjau pun
+            // ditangani — tutup dialog, jangan bawa aplikasi ikut mati.
+            w.setWebViewClient(new WebViewClient() {
+                @Override
+                public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail d) {
+                    try { dismiss(); } catch (Exception ignored) {}
+                    return true;
+                }
+            });
             s.setDisplayZoomControls(false);
             s.setLoadWithOverviewMode(true);
             s.setUseWideViewPort(true);
